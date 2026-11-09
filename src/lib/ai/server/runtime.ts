@@ -34,7 +34,7 @@ export type ActiveAiRuntime =
 
 export async function getActiveAiRuntime(
   requested?: OpenRouterModelSelection,
-  timeout = 30_000,
+  timeout = 60_000,
 ): Promise<ActiveAiRuntime> {
   const settings = await getByokSettings();
   if (!settings.connectionId) throw new Error("Connect an AI provider in AI Settings");
@@ -106,7 +106,7 @@ export async function getActiveAiRuntime(
 
 export async function getOpenRouterRuntime(
   requested?: OpenRouterModelSelection,
-  timeout = 30_000,
+  timeout = 60_000,
 ) {
   const settings = await getByokSettings();
   if (!settings.connectionId) throw new Error("Connect an AI provider in AI Settings");

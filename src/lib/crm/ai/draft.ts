@@ -11,7 +11,7 @@ import type {
   ClassificationPersonProfile,
 } from "./types";
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 60_000;
 // Reasoning models think inside this budget before the call; see structuredCompletion.
 const DEFAULT_MAX_OUTPUT_TOKENS = 6_000;
 const MAX_TEXT_LENGTH = 100_000;

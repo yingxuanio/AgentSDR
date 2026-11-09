@@ -404,7 +404,7 @@ export async function invokeOpenAiResponses(
   if (!apiKey) throw new Error("OpenAI API key is required");
 
   const urls = candidateOpenAiEndpointUrls(params.credentials.baseUrl ?? "", "/responses");
-  const timeoutSignal = AbortSignal.timeout(params.timeoutMs ?? 30_000);
+  const timeoutSignal = AbortSignal.timeout(params.timeoutMs ?? 60_000);
   const signal = params.signal ? AbortSignal.any([params.signal, timeoutSignal]) : timeoutSignal;
 
   const requestBody: Record<string, unknown> = {
@@ -445,27 +445,33 @@ export async function invokeOpenAiResponses(
       }
 
       if (!response.ok) {
-        if (response.status === 404 && i < urls.length - 1) {
+        const isJsonApiError = jsonBody !== null && typeof jsonBody === "object";
+        if (response.status === 404 && i < urls.length - 1 && !isJsonApiError) {
           continue;
         }
         const err = new Error(extractErrorMessage(jsonBody ?? rawText, response.status, "OpenAI Responses")) as Error & {
           status?: number;
+          isApiError?: boolean;
         };
         err.status = response.status;
+        err.isApiError = isJsonApiError;
         throw err;
       }
 
       if (!jsonBody && /^\s*<!doctype html/i.test(rawText)) {
         if (i < urls.length - 1) continue;
-        throw new Error(`OpenAI Responses endpoint (${endpoint}) returned an HTML page instead of JSON`);
+        throw new Error(
+          `OpenAI Responses endpoint (${endpoint}) returned an HTML page instead of JSON (HTTP ${response.status}). Check that the Base URL points to an API endpoint rather than a web UI.`,
+        );
       }
 
       const result = parseOpenAiResponsesPayload(jsonBody, rawText, params.model, endpoint);
       return { result, requestBody };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
-      const httpStatus = (error as { status?: number } | null)?.status;
-      if (httpStatus && httpStatus !== 404) throw lastError;
+      const httpErr = error as { status?: number; isApiError?: boolean } | null;
+      if (httpErr?.isApiError) throw lastError;
+      if (httpErr?.status && httpErr.status !== 404) throw lastError;
       if (i === urls.length - 1) throw lastError;
     }
   }
@@ -492,7 +498,7 @@ export async function invokeAnthropicMessages(
   if (!apiKey) throw new Error("Anthropic API key is required");
 
   const urls = candidateAnthropicEndpointUrls(params.credentials.baseUrl ?? "", "/messages");
-  const timeoutSignal = AbortSignal.timeout(params.timeoutMs ?? 30_000);
+  const timeoutSignal = AbortSignal.timeout(params.timeoutMs ?? 60_000);
   const signal = params.signal ? AbortSignal.any([params.signal, timeoutSignal]) : timeoutSignal;
 
   const requestBody: Record<string, unknown> = {
@@ -534,27 +540,33 @@ export async function invokeAnthropicMessages(
       }
 
       if (!response.ok) {
-        if (response.status === 404 && i < urls.length - 1) {
+        const isJsonApiError = jsonBody !== null && typeof jsonBody === "object";
+        if (response.status === 404 && i < urls.length - 1 && !isJsonApiError) {
           continue;
         }
         const err = new Error(extractErrorMessage(jsonBody ?? rawText, response.status, "Anthropic Messages")) as Error & {
           status?: number;
+          isApiError?: boolean;
         };
         err.status = response.status;
+        err.isApiError = isJsonApiError;
         throw err;
       }
 
       if (!jsonBody && /^\s*<!doctype html/i.test(rawText)) {
         if (i < urls.length - 1) continue;
-        throw new Error(`Anthropic Messages endpoint (${endpoint}) returned an HTML page instead of JSON`);
+        throw new Error(
+          `Anthropic Messages endpoint (${endpoint}) returned an HTML page instead of JSON (HTTP ${response.status}). Check that the Base URL points to an API endpoint rather than a web UI.`,
+        );
       }
 
       const result = parseAnthropicMessagesPayload(jsonBody, rawText, params.model, endpoint);
       return { result, requestBody };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
-      const httpStatus = (error as { status?: number } | null)?.status;
-      if (httpStatus && httpStatus !== 404) throw lastError;
+      const httpErr = error as { status?: number; isApiError?: boolean } | null;
+      if (httpErr?.isApiError) throw lastError;
+      if (httpErr?.status && httpErr.status !== 404) throw lastError;
       if (i === urls.length - 1) throw lastError;
     }
   }

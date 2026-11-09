@@ -7,6 +7,8 @@ import {
   normalizeOpenAiBaseUrl,
   parseAnthropicMessagesPayload,
   parseOpenAiResponsesPayload,
+  invokeAnthropicMessages,
+  invokeOpenAiResponses,
 } from "./custom-providers";
 
 describe("custom AI provider URL normalization", () => {
@@ -113,5 +115,107 @@ describe("OpenAI Responses & Anthropic Messages payload parsing", () => {
     const customAnthropic = getAiModel("anthropic", "claude-sonnet-4-5-20250929", "web-research");
     expect(customAnthropic?.modelId).toBe("claude-sonnet-4-5-20250929");
     expect(customAnthropic?.useCases).toContain("web-research");
+  });
+
+  test("does not fall through to HTML fallback route when primary endpoint returns JSON 404 API error", async () => {
+    const originalFetch = globalThis.fetch;
+    const requestedUrls: string[] = [];
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.includes("/v1/messages")) {
+        return new Response(
+          JSON.stringify({
+            type: "error",
+            error: {
+              type: "model_not_found",
+              message: 'Model "gemini-4-argon" is not supported by any configured account in this group',
+            },
+          }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("<!doctype html><html><head><title>SPA</title></head><body></body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      });
+    }) as typeof fetch;
+
+    try {
+      await expect(
+        invokeAnthropicMessages({
+          credentials: { apiKey: "sk-test", baseUrl: "https://token.linktion.cn" },
+          model: "gemini-4-argon",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      ).rejects.toThrow('Model "gemini-4-argon" is not supported by any configured account in this group');
+
+      // Verify that it threw immediately and did NOT request the fallback HTML route
+      expect(requestedUrls).toEqual(["https://token.linktion.cn/v1/messages"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("falls back to secondary URL when primary URL returns 404 without JSON (route not found)", async () => {
+    const originalFetch = globalThis.fetch;
+    const requestedUrls: string[] = [];
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url === "https://proxy.example.com/v1/messages") {
+        return new Response("404 Not Found", { status: 404, headers: { "Content-Type": "text/plain" } });
+      }
+      return new Response(
+        JSON.stringify({
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-5-5",
+          content: [{ type: "text", text: "Fallback worked" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const { result } = await invokeAnthropicMessages({
+        credentials: { apiKey: "sk-test", baseUrl: "https://proxy.example.com" },
+        model: "claude-sonnet-5-5",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      expect(result.text).toBe("Fallback worked");
+      expect(requestedUrls).toEqual([
+        "https://proxy.example.com/v1/messages",
+        "https://proxy.example.com/messages",
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("throws descriptive error when endpoint returns HTML page", async () => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => {
+      return new Response("<!doctype html><html><body>Web UI</body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      });
+    }) as typeof fetch;
+
+    try {
+      await expect(
+        invokeAnthropicMessages({
+          credentials: { apiKey: "sk-test", baseUrl: "https://token.linktion.cn" },
+          model: "claude-sonnet-5-5",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      ).rejects.toThrow("returned an HTML page instead of JSON (HTTP 200)");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
