@@ -59,7 +59,7 @@ async function syncEmailDraftAcrossInboxAndOutreach(
   bodyHtml: string | null | undefined,
 ): Promise<void> {
   const [person] = await tx
-    .select({ email: people.email })
+    .select({ email: people.email, companyId: people.companyId })
     .from(people)
     .where(and(eq(people.organizationId, record.organizationId), eq(people.id, record.personId)))
     .limit(1);
@@ -83,7 +83,9 @@ async function syncEmailDraftAcrossInboxAndOutreach(
   await tx.execute(sql`
     UPDATE outreach_emails
     SET subject = COALESCE(${finalSubject}, subject),
-        body = ${finalHtml}
+        body = ${finalHtml},
+        gmail_message_id = CASE WHEN gmail_message_id LIKE 'r%' THEN NULL ELSE gmail_message_id END,
+        thread_id = CASE WHEN thread_id LIKE 'r%' THEN NULL ELSE thread_id END
     WHERE status = 'scheduled'
       AND lead_id IN (
         SELECT ol.id
@@ -93,6 +95,95 @@ async function syncEmailDraftAcrossInboxAndOutreach(
           AND lower(ol.email) = lower(${email})
       )
   `);
+
+  await tx.execute(sql`
+    UPDATE outreach_leads
+    SET custom_fields = COALESCE(custom_fields, '{}'::jsonb) - 'gmailDraftId'
+    WHERE id IN (
+      SELECT ol.id
+      FROM outreach_leads ol
+      INNER JOIN outreach_campaigns oc ON oc.id = ol.campaign_id
+      WHERE oc.organization_id = ${record.organizationId}::uuid
+        AND lower(ol.email) = lower(${email})
+    )
+  `);
+
+  if (person?.companyId) {
+    await tx.execute(sql`
+      UPDATE companies
+      SET custom = COALESCE(custom, '{}'::jsonb) - 'x_gmail_draft_id',
+          raw = COALESCE(raw, '{}'::jsonb) - 'x_gmail_draft_id'
+      WHERE id = ${person.companyId}::uuid
+    `);
+  }
+}
+
+async function purgeEmailDraftFromInboxAndOutreach(
+  tx: CrmTransaction,
+  record: { organizationId: string; personId: string },
+): Promise<void> {
+  const [person] = await tx
+    .select({ email: people.email, companyId: people.companyId })
+    .from(people)
+    .where(and(eq(people.organizationId, record.organizationId), eq(people.id, record.personId)))
+    .limit(1);
+  const email = person?.email?.trim();
+  if (!email) return;
+
+  await tx.execute(sql`
+    DELETE FROM crm_email_drafts
+    WHERE lead_id IN (
+      SELECT id FROM crm_leads
+      WHERE organization_id = ${record.organizationId}::uuid
+        AND lower(email) = lower(${email})
+    )
+  `);
+
+  await tx.execute(sql`
+    DELETE FROM crm_leads
+    WHERE organization_id = ${record.organizationId}::uuid
+      AND lower(email) = lower(${email})
+      AND current_status_key = 'PENDING_FIRST_SEND'
+      AND NOT EXISTS (
+        SELECT 1 FROM crm_messages cm WHERE cm.lead_id = crm_leads.id
+      )
+  `);
+
+  await tx.execute(sql`
+    DELETE FROM outreach_emails
+    WHERE status = 'scheduled'
+      AND lead_id IN (
+        SELECT ol.id
+        FROM outreach_leads ol
+        INNER JOIN outreach_campaigns oc ON oc.id = ol.campaign_id
+        WHERE oc.organization_id = ${record.organizationId}::uuid
+          AND lower(ol.email) = lower(${email})
+      )
+  `);
+
+  await tx.execute(sql`
+    DELETE FROM outreach_leads
+    WHERE sequence_status = 'pending'
+      AND id IN (
+        SELECT ol.id
+        FROM outreach_leads ol
+        INNER JOIN outreach_campaigns oc ON oc.id = ol.campaign_id
+        WHERE oc.organization_id = ${record.organizationId}::uuid
+          AND lower(ol.email) = lower(${email})
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM outreach_emails oe WHERE oe.lead_id = outreach_leads.id
+      )
+  `);
+
+  if (person?.companyId) {
+    await tx.execute(sql`
+      UPDATE companies
+      SET custom = COALESCE(custom, '{}'::jsonb) - 'x_gmail_draft_id',
+          raw = COALESCE(raw, '{}'::jsonb) - 'x_gmail_draft_id'
+      WHERE id = ${person.companyId}::uuid
+    `);
+  }
 }
 
 function scalarAttributes(raw: Record<string, unknown> | null | undefined) {
@@ -646,13 +737,25 @@ export async function updateDraft(input: {
     const subject = draft.channel === "email" ? input.subject?.trim() || draft.subject : null;
     if (draft.channel === "email" && !subject) throw new Error("Email subject is required");
     const editedBodyHtml = input.bodyHtml?.trim() || textToParagraphHtml(bodyText);
+    const cleanedRequest = draft.request && typeof draft.request === "object"
+      ? Object.fromEntries(Object.entries(draft.request as Record<string, unknown>).filter(([k]) => k !== "gmailDraftId"))
+      : draft.request;
     const [updated] = await tx.update(crmDrafts).set({
       subject,
       editedBodyText: bodyText,
       editedBodyHtml,
+      request: cleanedRequest,
       revision: draft.revision + 1,
       updatedAt: new Date(),
     }).where(eq(crmDrafts.id, draft.id)).returning();
+    if (draft.conversationId) {
+      await tx.execute(sql`
+        UPDATE crm_conversations
+        SET provider_thread_id = NULL
+        WHERE id = ${draft.conversationId}::uuid
+          AND provider_thread_id LIKE 'r%'
+      `);
+    }
     if (draft.channel === "email") {
       await syncEmailDraftAcrossInboxAndOutreach(tx, record, subject, bodyText, editedBodyHtml);
     }
@@ -710,8 +813,39 @@ export async function discardDraft(input: { draftId: string; actorRef?: string |
       throw new CrmConflictError(`Cannot discard a ${draft.status} draft`);
     }
     const record = await lockCrmRecord(tx, draft.crmRecordId);
-    const [updated] = await tx.update(crmDrafts).set({ status: "discarded", updatedAt: new Date() })
-      .where(eq(crmDrafts.id, draft.id)).returning();
+    const now = new Date();
+    const cleanedRequest = draft.request && typeof draft.request === "object"
+      ? Object.fromEntries(Object.entries(draft.request as Record<string, unknown>).filter(([k]) => k !== "gmailDraftId"))
+      : draft.request;
+    const [updated] = await tx.update(crmDrafts).set({
+      status: "discarded",
+      request: cleanedRequest,
+      updatedAt: now,
+    }).where(eq(crmDrafts.id, draft.id)).returning();
+
+    if (draft.conversationId) {
+      await tx.execute(sql`
+        UPDATE crm_conversations
+        SET provider_thread_id = NULL
+        WHERE id = ${draft.conversationId}::uuid
+          AND provider_thread_id LIKE 'r%'
+      `);
+    }
+    if (draft.channel === "email") {
+      await purgeEmailDraftFromInboxAndOutreach(tx, record);
+    }
+
+    const [remainingReviewDraft] = await tx.select({ id: crmDrafts.id }).from(crmDrafts)
+      .where(and(eq(crmDrafts.crmRecordId, record.id), eq(crmDrafts.status, "awaiting_review")))
+      .limit(1);
+    if (!remainingReviewDraft && (record.workflowState === "action_required" || record.workflowState === "error")) {
+      await tx.update(crmRecords).set({
+        workflowState: "waiting",
+        nextActionAt: null,
+        updatedAt: now,
+      }).where(eq(crmRecords.id, record.id));
+    }
+
     await appendCrmEvent(tx, {
       personId: record.personId, crmRecordId: record.id, pipelineId: record.pipelineId,
       eventType: "draft.discarded", actorType: "authenticated_operator", actorRef: input.actorRef,
