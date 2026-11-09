@@ -105,8 +105,12 @@ export function proxy(request: NextRequest) {
   // away early.
   if (getSessionCookie(request)) return NextResponse.next();
 
-  // APIs answer in JSON; a redirect to an HTML page is useless to fetch().
+  // API routes also accept organization API keys (validated inside requireOrgContext).
   if (pathname.startsWith("/api/")) {
+    const hasApiKey =
+      Boolean(request.headers.get("x-api-key")?.trim()) ||
+      /^Bearer\s+\S+/i.test(request.headers.get("authorization")?.trim() ?? "");
+    if (hasApiKey) return NextResponse.next();
     return NextResponse.json({ error: "Sign in to continue", code: "UNAUTHENTICATED" }, { status: 401 });
   }
   const url = request.nextUrl.clone();

@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { messageParticipants } from "./participants";
 import { formatAiInstructions } from "./ai/instructions";
 import { db } from "@/lib/db";
@@ -42,6 +42,58 @@ type PreparedDraft = {
   draft: CrmDraft;
   promptInput: GenerateCrmDraftInput;
 };
+
+function textToParagraphHtml(bodyText: string): string {
+  const escaped = bodyText
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return `<p>${escaped.replace(/\n\n/g, "</p><p>").replace(/\n/g, "<br/>")}</p>`;
+}
+
+async function syncEmailDraftAcrossInboxAndOutreach(
+  tx: CrmTransaction,
+  record: { organizationId: string; personId: string },
+  subject: string | null | undefined,
+  bodyText: string,
+  bodyHtml: string | null | undefined,
+): Promise<void> {
+  const [person] = await tx
+    .select({ email: people.email })
+    .from(people)
+    .where(and(eq(people.organizationId, record.organizationId), eq(people.id, record.personId)))
+    .limit(1);
+  const email = person?.email?.trim();
+  if (!email) return;
+
+  const finalHtml = bodyHtml?.trim() || textToParagraphHtml(bodyText);
+  const finalSubject = subject?.trim() || null;
+
+  await tx.execute(sql`
+    UPDATE crm_email_drafts
+    SET subject = COALESCE(${finalSubject}, subject),
+        body_html = ${finalHtml}
+    WHERE lead_id IN (
+      SELECT id FROM crm_leads
+      WHERE organization_id = ${record.organizationId}::uuid
+        AND lower(email) = lower(${email})
+    )
+  `);
+
+  await tx.execute(sql`
+    UPDATE outreach_emails
+    SET subject = COALESCE(${finalSubject}, subject),
+        body = ${finalHtml}
+    WHERE status = 'scheduled'
+      AND lead_id IN (
+        SELECT ol.id
+        FROM outreach_leads ol
+        INNER JOIN outreach_campaigns oc ON oc.id = ol.campaign_id
+        WHERE oc.organization_id = ${record.organizationId}::uuid
+          AND lower(ol.email) = lower(${email})
+      )
+  `);
+}
 
 function scalarAttributes(raw: Record<string, unknown> | null | undefined) {
   return Object.fromEntries(Object.entries(raw ?? {}).filter((entry): entry is [string, string | number | boolean | null] => {
@@ -358,6 +410,9 @@ async function finishGeneratedDraft(
       await tx.update(crmRecords).set({ workflowState: "action_required", nextActionAt: now, updatedAt: now })
         .where(eq(crmRecords.id, record.id));
     }
+    if (draft.channel === "email") {
+      await syncEmailDraftAcrossInboxAndOutreach(tx, record, generated.subject, generated.bodyText, generated.bodyHtml);
+    }
     await appendCrmEvent(tx, {
       personId: record.personId,
       crmRecordId: record.id,
@@ -570,7 +625,7 @@ export async function generateDraftForStep(
 
 export async function updateDraft(input: {
   draftId: string;
-  revision: number;
+  revision?: number | null;
   subject?: string | null;
   bodyText: string;
   bodyHtml?: string | null;
@@ -583,18 +638,24 @@ export async function updateDraft(input: {
       .where(and(draftInOrg(), eq(crmDrafts.id, input.draftId))).limit(1).for("update");
     if (!draft) throw new CrmNotFoundError("CRM draft", input.draftId);
     if (draft.status !== "awaiting_review") throw new CrmConflictError("Only awaiting-review drafts can be edited");
-    if (draft.revision !== input.revision) throw new CrmConflictError("Draft revision is stale");
+    if (typeof input.revision === "number" && draft.revision !== input.revision) {
+      throw new CrmConflictError("Draft revision is stale");
+    }
     const record = await lockCrmRecord(tx, draft.crmRecordId);
     assertCurrentCrmContext(record, { contextVersion: draft.expectedContextVersion });
     const subject = draft.channel === "email" ? input.subject?.trim() || draft.subject : null;
     if (draft.channel === "email" && !subject) throw new Error("Email subject is required");
+    const editedBodyHtml = input.bodyHtml?.trim() || textToParagraphHtml(bodyText);
     const [updated] = await tx.update(crmDrafts).set({
       subject,
       editedBodyText: bodyText,
-      editedBodyHtml: input.bodyHtml?.trim() || null,
+      editedBodyHtml,
       revision: draft.revision + 1,
       updatedAt: new Date(),
     }).where(eq(crmDrafts.id, draft.id)).returning();
+    if (draft.channel === "email") {
+      await syncEmailDraftAcrossInboxAndOutreach(tx, record, subject, bodyText, editedBodyHtml);
+    }
     await appendCrmEvent(tx, {
       personId: record.personId, crmRecordId: record.id, pipelineId: record.pipelineId,
       eventType: "draft.edited", actorType: "authenticated_operator", actorRef: input.actorRef,
