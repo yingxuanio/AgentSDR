@@ -6,7 +6,9 @@ import {
   toolCallSystemPrompt,
   type OpenRouterModelSelection,
 } from "@/lib/ai/openrouter-types";
-import { getOpenRouterRuntime } from "./runtime";
+import { invokeAnthropicMessages, invokeOpenAiResponses } from "./custom-providers";
+import { getActiveAiRuntime, getOpenRouterRuntime } from "./runtime";
+import { jsonInstruction, parseJsonResponse } from "./types";
 
 /**
  * Every structured answer in the app is requested as a function call, never
@@ -134,6 +136,13 @@ export async function completeStructuredWithOpenRouter(
   input: StructuredCompletionInput,
   dependencies: { runtime?: StructuredCompletionRuntime; sleep?: typeof sleep } = {},
 ): Promise<StructuredCompletionResult> {
+  if (!dependencies.runtime) {
+    const activeRuntime = await getActiveAiRuntime(input.requestedModel, input.timeoutMs);
+    if (activeRuntime.kind === "openai" || activeRuntime.kind === "anthropic") {
+      return completeStructuredWithCustomRuntime(input, activeRuntime, dependencies.sleep ?? sleep);
+    }
+  }
+
   const { client, selection, provider } = await (dependencies.runtime ?? getOpenRouterRuntime)(
     input.requestedModel,
     input.timeoutMs,
@@ -216,6 +225,132 @@ export async function completeStructuredWithOpenRouter(
   for (let index = 0; index < maxAttempts; index += 1) {
     if (index > 0) {
       await (dependencies.sleep ?? sleep)(RETRY_BACKOFF_MS[Math.min(index - 1, RETRY_BACKOFF_MS.length - 1)], input.signal);
+    }
+    try {
+      return { ...(await attempt()), attempts: index + 1 };
+    } catch (error) {
+      lastError = error;
+      const retryable = error instanceof RejectedAttemptError || isRetryableOpenRouterError(error);
+      if (!retryable || input.signal?.aborted) throw error;
+    }
+  }
+  const reason = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(`${input.schemaName} failed after ${maxAttempts} attempts: ${reason}`, { cause: lastError });
+}
+
+async function completeStructuredWithCustomRuntime(
+  input: StructuredCompletionInput,
+  runtime: Extract<Awaited<ReturnType<typeof getActiveAiRuntime>>, { kind: "openai" | "anthropic" }>,
+  sleepFn: typeof sleep,
+): Promise<StructuredCompletionResult> {
+  const maxAttempts = Math.max(1, Math.floor(input.maxAttempts ?? DEFAULT_MAX_ATTEMPTS));
+  let outputTokens = input.maxOutputTokens;
+  const { selection, credentials, kind } = runtime;
+
+  const systemWithTool = toolCallSystemPrompt(input.systemPrompt, input.schemaName);
+
+  async function attempt(): Promise<Omit<StructuredCompletionResult, "attempts">> {
+    const callOutcome =
+      kind === "openai"
+        ? await invokeOpenAiResponses({
+            credentials,
+            model: selection.modelId,
+            instructions: systemWithTool,
+            input: input.userPrompt,
+            maxOutputTokens: outputTokens,
+            tools: [
+              {
+                type: "function",
+                name: input.schemaName,
+                description:
+                  input.schemaDescription
+                  ?? "Submit the structured result. Call it exactly once; it is the only way to answer.",
+                parameters: input.jsonSchema,
+              },
+            ],
+            toolChoice: { type: "function", name: input.schemaName },
+            timeoutMs: input.timeoutMs,
+            signal: input.signal,
+          })
+        : await invokeAnthropicMessages({
+            credentials,
+            model: selection.modelId,
+            system: systemWithTool,
+            messages: [{ role: "user", content: input.userPrompt }],
+            maxTokens: outputTokens,
+            tools: [
+              {
+                name: input.schemaName,
+                description:
+                  input.schemaDescription
+                  ?? "Submit the structured result. Call it exactly once; it is the only way to answer.",
+                input_schema: input.jsonSchema,
+              },
+            ],
+            toolChoice: { type: "tool", name: input.schemaName },
+            timeoutMs: input.timeoutMs,
+            signal: input.signal,
+          });
+
+    const { result, requestBody } = callOutcome;
+    input.onRequest?.(requestBody);
+
+    const matchedToolCall =
+      result.toolCalls.find((candidate) => candidate.name === input.schemaName) ?? result.toolCalls[0];
+
+    let text = matchedToolCall?.arguments ?? "";
+
+    // If the model returned a direct JSON object in text instead of a tool call, accept it
+    if ((!text || !isJsonObjectText(text)) && result.text.trim()) {
+      try {
+        const parsed = parseJsonResponse(result.text);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          text = JSON.stringify(parsed);
+        }
+      } catch {
+        // handled below
+      }
+    }
+
+    if (!text) {
+      if (result.stopReason === "length" || result.stopReason === "max_tokens") {
+        const spent = outputTokens;
+        outputTokens *= 2;
+        throw new RejectedAttemptError(
+          `The model ran out of output tokens (${spent}) before calling ${input.schemaName}`,
+        );
+      }
+      throw new RejectedAttemptError(
+        result.text.trim()
+          ? `The model answered in prose instead of calling ${input.schemaName}`
+          : `The model returned neither a ${input.schemaName} call nor content`,
+      );
+    }
+
+    if (!isJsonObjectText(text)) {
+      throw new RejectedAttemptError(`The ${input.schemaName} call carried arguments that are not a JSON object`);
+    }
+
+    try {
+      input.accept?.(text);
+    } catch (error) {
+      throw new RejectedAttemptError(error instanceof Error ? error.message : String(error));
+    }
+
+    return {
+      text,
+      provider: selection.provider,
+      model: selection.modelId,
+      request: requestBody,
+      response: result.raw,
+      usage: result.usage,
+    };
+  }
+
+  let lastError: unknown;
+  for (let index = 0; index < maxAttempts; index += 1) {
+    if (index > 0) {
+      await sleepFn(RETRY_BACKOFF_MS[Math.min(index - 1, RETRY_BACKOFF_MS.length - 1)], input.signal);
     }
     try {
       return { ...(await attempt()), attempts: index + 1 };

@@ -157,7 +157,7 @@ export default function CrmRecordClient({ recordId, variant = "page" }: { record
 
   useEffect(() => { void load(); }, [load]);
 
-  const mutate = async (path: string, body: Data = {}, method = "POST", success = "Changes saved") => {
+  const mutate = async (path: string, body: Data = {}, method = "POST", success = "Changes saved"): Promise<boolean> => {
     setNotice("");
     setError("");
     try {
@@ -166,7 +166,11 @@ export default function CrmRecordClient({ recordId, variant = "page" }: { record
       // A list under the pop-up holding this record re-reads its row.
       announceRecordChanged(recordId);
       await load();
-    } catch (cause) { setError(errorMessage(cause)); }
+      return true;
+    } catch (cause) {
+      setError(errorMessage(cause));
+      return false;
+    }
   };
 
   // Only the first load blanks the page; a reload after an action keeps the
@@ -223,7 +227,7 @@ export default function CrmRecordClient({ recordId, variant = "page" }: { record
           categoryKey={String(data.categoryKey ?? asObject(data.classification).category ?? "other")}
           subcategoryId={data.subcategoryId ? String(data.subcategoryId) : null}
           contextVersion={Number(data.contextVersion)}
-          onMove={async (body) => { await mutate(`/records/${String(data.id)}/stage`, body, "POST", moveStageSuccessMessage(body)); return true; }}
+          onMove={(body) => mutate(`/records/${String(data.id)}/stage`, body, "POST", moveStageSuccessMessage(body))}
         />}
       />
 
@@ -330,7 +334,7 @@ function RecordHeader({ back, data, person, name, avatarUrl, currentStep, active
   avatarUrl: string | null;
   currentStep: Data;
   activeRun: Data;
-  onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<void>;
+  onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<boolean>;
   /** Bumps the Calls card's refreshKey once the extension accepts a call. */
   onCallStarted: () => void;
   /** Move stage: record something that happened and move the lead on. */
@@ -523,7 +527,7 @@ function ReplyComposer({ record, draft, conversations, citations, uncertainAttem
   conversations: Data[];
   citations: Data[];
   uncertainAttempt?: Data;
-  onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<void>;
+  onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<boolean>;
 }) {
   const draftConversationId = text(draft.conversationId);
   const defaultConversation = conversations.find((item) => item.id === draftConversationId) ?? conversations.find((item) => item.channel === record.activeChannel) ?? conversations[0];
@@ -633,7 +637,7 @@ function ReplyComposer({ record, draft, conversations, citations, uncertainAttem
             <SenderPicker conversations={conversations} value={conversationId} onChange={changeConversation} />
             <div className="ml-auto flex items-center gap-2">
               {editingCurrentDraft ? <>
-                <RegenerateDraftDialog open={regenerateOpen} onOpenChange={setRegenerateOpen} onSubmit={async (feedback) => { await onAction(`/drafts/${String(draft.id)}/regenerate`, { feedback }, "POST", "Draft rewritten with your notes"); return true; }} />
+                <RegenerateDraftDialog open={regenerateOpen} onOpenChange={setRegenerateOpen} onSubmit={(feedback) => onAction(`/drafts/${String(draft.id)}/regenerate`, { feedback }, "POST", "Draft rewritten with your notes")} />
                 <button type="button" disabled={!ready} className={secondaryButtonClass} onClick={() => void onAction(`/drafts/${String(draft.id)}`, { subject: requestSubject, body, revision }, "PATCH", "Draft saved")}><RiSaveLine className="size-4" aria-hidden="true" />Save</button>
                 <button type="button" disabled={!ready} className={primaryButtonClass} onClick={() => void onAction(`/drafts/${String(draft.id)}/send`, { subject: requestSubject, body, revision }, "POST", "Reply queued for sending")}><RiSendPlaneLine className="size-4" aria-hidden="true" />Approve &amp; send</button>
               </> : <button type="button" disabled={!ready} className={primaryButtonClass} onClick={() => void onAction(`/records/${String(record.id)}/draft`, { conversationId, subject: requestSubject, bodyText: body, bodyHtml: null }, "POST", "Draft created and ready for review")}><RiSaveLine className="size-4" aria-hidden="true" />Create draft</button>}
@@ -711,7 +715,7 @@ function InlineWarning({ tone, title, detail }: { tone: "warning" | "danger"; ti
  * never saw at all — the two need their own controls, not one dropdown doing
  * both jobs.
  */
-function ClassificationSelect({ record, categories, onAction }: { record: Data; categories: Data[]; onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<void> }) {
+function ClassificationSelect({ record, categories, onAction }: { record: Data; categories: Data[]; onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<boolean> }) {
   const classification = asObject(record.classification);
   const categoryKey = String(record.categoryKey ?? classification.category ?? "other");
   const subcategoryId = record.subcategoryId ? String(record.subcategoryId) : null;
@@ -745,7 +749,7 @@ function ClassificationSelect({ record, categories, onAction }: { record: Data; 
  * and the record stays where it was. This surfaces that held proposal so a
  * human decides rather than it sitting silent in the classification history.
  */
-function ProposedClassificationNotice({ record, categories, onAction }: { record: Data; categories: Data[]; onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<void> }) {
+function ProposedClassificationNotice({ record, categories, onAction }: { record: Data; categories: Data[]; onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<boolean> }) {
   const classification = asObject(record.classification);
   if (classification.status !== "proposed") return null;
   const proposedCategoryKey = classification.proposedCategoryKey ? String(classification.proposedCategoryKey) : null;

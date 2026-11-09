@@ -26,44 +26,55 @@ export async function PUT(req: NextRequest) {
       }
       const settings = normalizeByokSettings(body);
       if (settings.providers.length && !settings.connectionId) {
-        return NextResponse.json({ error: "Connect OpenRouter before selecting providers" }, { status: 400 });
-      }
-      if (settings.providers.length && !settings.byokOnlyConfirmed) {
-        return NextResponse.json({ error: "Confirm BYOK-only routing before saving" }, { status: 400 });
+        return NextResponse.json({ error: "Connect an AI provider before selecting models" }, { status: 400 });
       }
       if (settings.connectionId) {
         const connection = await getAiConnection(settings.connectionId);
-        if (!connection?.verified || connection.providerKey !== "openrouter") {
-          return NextResponse.json({ error: "Select a verified OpenRouter connection" }, { status: 400 });
+        if (!connection?.verified) {
+          return NextResponse.json({ error: "Select a verified AI connection" }, { status: 400 });
         }
-        if (settings.providers.length) {
+        if (connection.providerKey === "openai" || connection.providerKey === "anthropic") {
           const credentials = await getAiCredentials(connection.id);
-          if (!credentials?.apiKey || !credentials.managementKey) {
-            return NextResponse.json({ error: "Reconnect OpenRouter before saving" }, { status: 400 });
+          if (!credentials?.apiKey) {
+            return NextResponse.json({ error: "Reconnect your AI provider before saving" }, { status: 400 });
           }
-          try {
-            const catalog = await listOpenRouterByokCatalog(credentials.managementKey);
-            const available = new Map(catalog.map((provider) => [provider.slug, new Set(provider.models.map((model) => model.id))]));
-            for (const provider of settings.providers) {
-              const models = available.get(provider);
-              if (!models) return NextResponse.json({ error: `${provider} has no active BYOK credential` }, { status: 400 });
-              if (settings.modelsByProvider[provider].some((model) => !models.has(model))) {
-                return NextResponse.json({ error: `One or more selected ${provider} models are no longer available through BYOK` }, { status: 400 });
-              }
-            }
-            if (settings.defaultModel) {
-              const defaultProvider = catalog.find((provider) => provider.slug === settings.defaultModel?.provider);
-              const defaultModel = defaultProvider?.models.find((model) => model.id === settings.defaultModel?.modelId);
-              if (
-                !defaultModel?.outputModalities?.includes("text")
-                || !defaultModel.supportedParameters?.includes("tools")
-              ) {
-                return NextResponse.json({ error: "The default model must support function calling" }, { status: 400 });
-              }
-            }
-          } catch (error) {
-            return NextResponse.json({ error: error instanceof Error ? error.message : "Could not validate OpenRouter BYOK settings" }, { status: 502 });
+          // Direct OpenAI Responses / Anthropic Messages connections always use the user's own API key directly.
+          settings.byokOnlyConfirmed = true;
+        } else if (connection.providerKey === "openrouter") {
+          if (settings.providers.length && !settings.byokOnlyConfirmed) {
+            return NextResponse.json({ error: "Confirm BYOK-only routing before saving" }, { status: 400 });
           }
+          if (settings.providers.length) {
+            const credentials = await getAiCredentials(connection.id);
+            if (!credentials?.apiKey || !credentials.managementKey) {
+              return NextResponse.json({ error: "Reconnect OpenRouter before saving" }, { status: 400 });
+            }
+            try {
+              const catalog = await listOpenRouterByokCatalog(credentials.managementKey);
+              const available = new Map(catalog.map((provider) => [provider.slug, new Set(provider.models.map((model) => model.id))]));
+              for (const provider of settings.providers) {
+                const models = available.get(provider);
+                if (!models) return NextResponse.json({ error: `${provider} has no active BYOK credential` }, { status: 400 });
+                if (settings.modelsByProvider[provider].some((model) => !models.has(model))) {
+                  return NextResponse.json({ error: `One or more selected ${provider} models are no longer available through BYOK` }, { status: 400 });
+                }
+              }
+              if (settings.defaultModel) {
+                const defaultProvider = catalog.find((provider) => provider.slug === settings.defaultModel?.provider);
+                const defaultModel = defaultProvider?.models.find((model) => model.id === settings.defaultModel?.modelId);
+                if (
+                  !defaultModel?.outputModalities?.includes("text")
+                  || !defaultModel.supportedParameters?.includes("tools")
+                ) {
+                  return NextResponse.json({ error: "The default model must support function calling" }, { status: 400 });
+                }
+              }
+            } catch (error) {
+              return NextResponse.json({ error: error instanceof Error ? error.message : "Could not validate OpenRouter BYOK settings" }, { status: 502 });
+            }
+          }
+        } else {
+          return NextResponse.json({ error: `Unsupported AI provider ${connection.providerKey}` }, { status: 400 });
         }
       }
       if (settings.providers.some((provider) => !(settings.modelsByProvider[provider]?.length))) {

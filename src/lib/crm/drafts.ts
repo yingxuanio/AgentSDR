@@ -418,6 +418,12 @@ const FALLBACK_STEP_INSTRUCTIONS = [
   "says they are not the right contact, thank them and ask who is.",
 ].join(" ");
 
+const OUTBOUND_FALLBACK_STEP_INSTRUCTIONS = [
+  "This is an initial outbound outreach draft (no inbound reply yet).",
+  "Write or refine a concise, high-trust outreach message tailored to the person and company profile, knowledge excerpts, and any reviewer feedback or previous draft.",
+  "Use only facts present in the person/company attributes, knowledge excerpts, or previous draft — never invent product details, pricing, availability, names, dates or commitments.",
+].join(" ");
+
 const FALLBACK_DRAFT_STATUSES = ["generating", "awaiting_review", "failed"] as const;
 
 /**
@@ -432,27 +438,8 @@ async function loadFallbackDraftContext(
   recordId: string,
 ): Promise<PreparedDraft | null> {
   const record = await lockCrmRecord(tx, recordId);
-  // Both of these are "nothing to draft", not failures — returning null keeps
-  // the job from retrying three times over a record we deliberately skip.
-  if (!record.latestInboundMessageId) return null;
   if (await isPersonDoNotContact(tx, record.personId)) return null;
 
-  const [conversation] = await tx
-    .select({ conversation: crmConversations })
-    .from(crmConversationMessages)
-    .innerJoin(crmConversations, eq(crmConversations.id, crmConversationMessages.conversationId))
-    .where(eq(crmConversationMessages.id, record.latestInboundMessageId))
-    .limit(1);
-  if (!conversation) {
-    throw new CrmNotFoundError("CRM conversation for message", record.latestInboundMessageId);
-  }
-
-  const subject = await loadDraftSubject(tx, record, conversation.conversation.id, {
-    query: FALLBACK_STEP_INSTRUCTIONS,
-    knowledgeTags: [],
-  });
-
-  const now = new Date();
   const [existing] = await tx
     .select()
     .from(crmDrafts)
@@ -466,6 +453,45 @@ async function loadFallbackDraftContext(
     .limit(1)
     .for("update");
 
+  // Both of these are "nothing to draft", not failures — returning null keeps
+  // the job from retrying three times over a record we deliberately skip.
+  if (!record.latestInboundMessageId && !existing?.conversationId) return null;
+
+  let conversationRow: typeof crmConversations.$inferSelect | undefined;
+  if (record.latestInboundMessageId) {
+    const [found] = await tx
+      .select({ conversation: crmConversations })
+      .from(crmConversationMessages)
+      .innerJoin(crmConversations, eq(crmConversations.id, crmConversationMessages.conversationId))
+      .where(eq(crmConversationMessages.id, record.latestInboundMessageId))
+      .limit(1);
+    conversationRow = found?.conversation;
+  }
+  if (!conversationRow && existing?.conversationId) {
+    const [found] = await tx
+      .select()
+      .from(crmConversations)
+      .where(eq(crmConversations.id, existing.conversationId))
+      .limit(1);
+    conversationRow = found;
+  }
+  if (!conversationRow) {
+    if (record.latestInboundMessageId) {
+      throw new CrmNotFoundError("CRM conversation for message", record.latestInboundMessageId);
+    }
+    return null;
+  }
+
+  const stepInstructions = record.latestInboundMessageId
+    ? FALLBACK_STEP_INSTRUCTIONS
+    : OUTBOUND_FALLBACK_STEP_INSTRUCTIONS;
+
+  const subject = await loadDraftSubject(tx, record, conversationRow.id, {
+    query: stepInstructions,
+    knowledgeTags: [],
+  });
+
+  const now = new Date();
   let draft: CrmDraft | undefined;
   if (existing) {
     [draft] = await tx.update(crmDrafts).set({
@@ -477,11 +503,11 @@ async function loadFallbackDraftContext(
   } else {
     [draft] = await tx.insert(crmDrafts).values({
       crmRecordId: record.id,
-      conversationId: conversation.conversation.id,
+      conversationId: conversationRow.id,
       replyForMessageId: record.latestInboundMessageId,
       sequenceStepRunId: null,
       expectedContextVersion: record.contextVersion,
-      channel: conversation.conversation.channel,
+      channel: conversationRow.channel,
       status: "generating",
     }).returning();
   }
@@ -490,15 +516,15 @@ async function loadFallbackDraftContext(
   return {
     draft,
     promptInput: {
-      channel: conversation.conversation.channel,
+      channel: conversationRow.channel,
       sequenceStep: {
         id: null,
-        name: "Free-form reply",
+        name: record.latestInboundMessageId ? "Free-form reply" : "Initial outreach",
         position: 1,
         stepType: "reply",
         subjectTemplate: null,
         bodyTemplate: null,
-        aiInstructions: FALLBACK_STEP_INSTRUCTIONS,
+        aiInstructions: stepInstructions,
         knowledgeTags: [],
       },
       ...subject,
@@ -597,8 +623,13 @@ export async function regenerateDraft(
     throw new CrmConflictError(`Cannot regenerate a ${draft.status} draft`);
   }
   const previousBody = (draft.editedBodyText ?? draft.aiBodyText ?? "").trim();
-  const revision: DraftRevisionRequest | null = feedback?.trim() && previousBody
-    ? { previousDraft: { subject: draft.subject, bodyText: previousBody }, reviewerFeedback: feedback.trim() }
+  const effectiveFeedback =
+    feedback?.trim() ||
+    (!draft.sequenceStepRunId && !draft.replyForMessageId && previousBody
+      ? "Refine and improve this outreach draft while preserving its core project scope, factual context, and link."
+      : "");
+  const revision: DraftRevisionRequest | null = effectiveFeedback && previousBody
+    ? { previousDraft: { subject: draft.subject, bodyText: previousBody }, reviewerFeedback: effectiveFeedback }
     : null;
   if (draft.sequenceStepRunId) return generateDraftForStep(draft.sequenceStepRunId, dependencies, revision, true);
   // A step-less draft the AI wrote is a no-sequence fallback and can be redrafted;

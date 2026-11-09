@@ -268,12 +268,11 @@ export default function AiDialog({
         ...choice,
         model: { ...choice.model, producesImages: useCase === "image-generation" },
       })),
-    ...modelsForUseCase(useCase).map((choice) => ({ ...choice, upstreamProvider: "", upstreamProviderName: choice.provider.name })),
   ], [openRouterChoices, useCase]);
   const provider = getAiProvider(providerKey);
   const selectedChoice = choices.find((choice) => choice.model.key === modelKey && choice.upstreamProvider === upstreamProvider);
   const model = selectedChoice?.model
-    ?? (providerKey === "openrouter" ? null : getAiModel(providerKey, modelKey, useCase));
+    ?? getAiModel(providerKey, modelKey, useCase);
 
   // Once per open: the use case only filters the list, which happens here.
   // The loading flag is raised while rendering the open transition (not in the effect).
@@ -285,31 +284,36 @@ export default function AiDialog({
   useEffect(() => {
     if (!open) return;
     void fetch("/api/ai/openrouter/models").then(async (response) => {
-      const body = await response.json() as { error?: string; models?: Array<{ id: string; name: string; description?: string; provider: string; providerName: string; outputModalities?: string[] }>; settings?: { connectionId?: string | null; defaultModel?: { provider: string; modelId: string } | null } };
-      if (!response.ok) return setError(body.error ?? "Could not load configured OpenRouter models");
-      const provider = getAiProvider("openrouter");
-      if (!provider) return;
-      const next = (body.models ?? []).map((model) => {
+      const body = await response.json() as {
+        error?: string;
+        models?: Array<{ id: string; name: string; description?: string; provider: string; providerName: string; providerKey?: string; outputModalities?: string[] }>;
+        settings?: { connectionId?: string | null; defaultModel?: { provider: string; modelId: string } | null };
+        connection?: { providerKey?: string };
+      };
+      if (!response.ok) return setError(body.error ?? "Could not load configured AI models");
+      const fallbackProviderKey = body.connection?.providerKey ?? "openrouter";
+      const next = (body.models ?? []).flatMap((model) => {
+        const resolvedProvider = getAiProvider(model.providerKey ?? fallbackProviderKey);
+        if (!resolvedProvider) return [];
         const modalities = model.outputModalities ?? ["text"];
         const useCases: AiUseCase[] = [];
         if (modalities.includes("text")) useCases.push("content", "web-research");
         if (modalities.includes("image")) useCases.push("image-generation");
-        return {
-          provider,
+        return [{
+          provider: resolvedProvider,
           upstreamProvider: model.provider,
           upstreamProviderName: model.providerName,
           model: {
             key: model.id,
             modelId: model.id,
             name: model.name,
-            description: model.description ?? "OpenRouter model",
+            description: model.description ?? `${resolvedProvider.name} model`,
             useCases,
             creditsPerRun: 0,
           },
-        };
+        }];
       });
       setOpenRouterChoices(next);
-      // OpenRouter columns must use the connection chosen in AI Settings; a stale saved one would be refused.
       setConnectionIdRaw((current) => body.settings?.connectionId || current);
       setDefaultModel(body.settings?.defaultModel ?? null);
     }).finally(() => setModelsLoading(false));
@@ -318,12 +322,14 @@ export default function AiDialog({
   // A new column starts on the AI Settings default when it suits the use
   // case — without replacing a model the person already picked.
   // Adjusted while rendering: once the choice is made, modelKey is set and this stops.
-  if (!saved?.modelKey && !modelKey && defaultModel
-    && openRouterChoices.some((choice) =>
-      choice.model.key === defaultModel.modelId
-      && choice.upstreamProvider === defaultModel.provider
-      && choice.model.useCases.includes(useCase))) {
-    setProviderKey("openrouter");
+  const defaultChoice = defaultModel
+    ? openRouterChoices.find((choice) =>
+        choice.model.key === defaultModel.modelId
+        && choice.upstreamProvider === defaultModel.provider
+        && choice.model.useCases.includes(useCase))
+    : undefined;
+  if (!saved?.modelKey && !modelKey && defaultChoice && defaultModel) {
+    setProviderKey(defaultChoice.provider.key);
     setModelKey(defaultModel.modelId);
     setUpstreamProvider(defaultModel.provider);
   }

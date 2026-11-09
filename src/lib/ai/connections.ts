@@ -27,12 +27,14 @@ export type AiConnection = {
   id: string;
   providerKey: string;
   name: string;
+  baseUrl?: string;
   enabled: boolean;
   verified: boolean;
 };
 
 type AiProviderConfig = Record<string, unknown> & {
   aiProviderKey?: string;
+  baseUrl?: string;
   verification?: { status?: "verified"; verifiedAt?: string };
 };
 
@@ -42,6 +44,7 @@ function toConnection(provider: GridProvider): AiConnection {
     id: provider.id,
     providerKey: String(config.aiProviderKey ?? ""),
     name: provider.name,
+    ...(typeof config.baseUrl === "string" && config.baseUrl.trim() ? { baseUrl: config.baseUrl.trim() } : {}),
     enabled: provider.enabled,
     verified: provider.enabled && config.verification?.status === "verified",
   };
@@ -112,6 +115,7 @@ export async function createAiConnection(input: {
         name: name || `${provider.name} account`,
         config: {
           aiProviderKey: input.providerKey,
+          ...(credentials.baseUrl ? { baseUrl: credentials.baseUrl } : {}),
           verification: { status: "verified", verifiedAt: new Date().toISOString() },
         },
         enabled: true,

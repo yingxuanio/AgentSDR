@@ -1,26 +1,24 @@
 import "server-only";
 
 import OpenAI from "openai";
-import { PermanentRunError } from "@/lib/grid/runners/types";
+import { PermanentRunError, RetryableRunError } from "@/lib/grid/runners/types";
+import { invokeOpenAiResponses, normalizeOpenAiBaseUrl } from "./custom-providers";
 import { jsonInstruction, parseJsonResponse, type AiRunner } from "./types";
 
 function client(credentials: Record<string, string>, timeoutMs: number) {
   return new OpenAI({
     apiKey: credentials.apiKey,
+    baseURL: normalizeOpenAiBaseUrl(credentials.baseUrl),
     organization: credentials.organization?.trim() || undefined,
     timeout: timeoutMs,
   });
 }
 
 /**
- * GPT text models.
- *
- * Uses the Responses API rather than chat completions because that is where
- * the hosted web_search tool lives — the "Web research" use case needs the
- * model to reach the live web, and doing that client-side would mean building
- * a scrape-and-summarise loop this column has no business owning.
+ * GPT text models via OpenAI Responses API (/v1/responses).
  */
 export const runOpenAi: AiRunner = async ({
+  config,
   model,
   credentials,
   prompt,
@@ -29,8 +27,6 @@ export const runOpenAi: AiRunner = async ({
   timeoutMs,
   signal,
 }) => {
-  const openai = client(credentials, timeoutMs);
-
   const instructions = [
     "You are filling in one row of a spreadsheet.",
     "Answer only from what you are given or can verify. If a value cannot be",
@@ -40,24 +36,36 @@ export const runOpenAi: AiRunner = async ({
   ].join("\n\n");
 
   try {
-    const response = await openai.responses.create(
-      {
-        model: model.modelId,
-        instructions,
-        input: prompt,
-        max_output_tokens: model.maxOutputTokens ?? 16000,
-        ...(model.supportsWebSearch ? { tools: [{ type: "web_search" as const }] } : {}),
-      },
-      { signal },
-    );
+    const { result, requestBody } = await invokeOpenAiResponses({
+      credentials,
+      model: model.modelId,
+      instructions,
+      input: prompt,
+      maxOutputTokens: config.maxTokens ?? model.maxOutputTokens ?? 16000,
+      ...(schema
+        ? {
+            tools: [
+              {
+                type: "function",
+                name: "fill_row",
+                description: "Submit the structured row values.",
+                parameters: schema,
+              },
+            ],
+            toolChoice: "auto",
+          }
+        : {}),
+      timeoutMs,
+      signal,
+    });
 
-    const text = (response.output_text ?? "").trim();
+    const toolCall = result.toolCalls.find((call) => call.name === "fill_row") ?? result.toolCalls[0];
+    const text = (toolCall?.arguments ?? result.text ?? "").trim();
     return {
       value: schema ? parseJsonResponse(text) : text,
-      usage: {
-        inputTokens: response.usage?.input_tokens,
-        outputTokens: response.usage?.output_tokens,
-      },
+      usage: result.usage,
+      raw: result.raw,
+      request: requestBody,
     };
   } catch (cause) {
     throw asPermanent(cause);
@@ -84,12 +92,16 @@ export const runOpenAiImage: AiRunner = async ({ model, credentials, prompt, tim
 
 /** A rejected key or unknown model will fail identically on every row. */
 function asPermanent(cause: unknown): unknown {
-  if (cause instanceof PermanentRunError) return cause;
-  if (cause instanceof OpenAI.AuthenticationError) {
+  if (cause instanceof PermanentRunError || cause instanceof RetryableRunError) return cause;
+  const status = (cause as { status?: number })?.status;
+  if (status === 429 || (typeof status === "number" && status >= 500)) {
+    return new RetryableRunError(cause instanceof Error ? cause.message : "OpenAI Responses temporary error");
+  }
+  if (cause instanceof OpenAI.AuthenticationError || status === 401 || status === 403) {
     return new PermanentRunError("OpenAI rejected this API key");
   }
-  if (cause instanceof OpenAI.NotFoundError || cause instanceof OpenAI.BadRequestError) {
-    return new PermanentRunError(cause.message);
+  if (cause instanceof OpenAI.NotFoundError || cause instanceof OpenAI.BadRequestError || status === 400 || status === 404) {
+    return new PermanentRunError(cause instanceof Error ? cause.message : "OpenAI Responses rejected the request");
   }
   return cause;
 }

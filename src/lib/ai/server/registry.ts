@@ -1,6 +1,8 @@
 import "server-only";
 
 import { AI_PROVIDERS } from "../catalog";
+import { runAnthropic } from "./anthropic";
+import { runOpenAi, runOpenAiImage } from "./openai";
 import { runOpenRouter, runOpenRouterImage } from "./openrouter-runner";
 import type { AiRunner } from "./types";
 
@@ -11,6 +13,8 @@ import type { AiRunner } from "./types";
  * endpoint on every provider, not a parameter on the text one.
  */
 const RUNNERS: Record<string, { text?: AiRunner; image?: AiRunner }> = {
+  openai: { text: runOpenAi, image: runOpenAiImage },
+  anthropic: { text: runAnthropic },
   openrouter: { text: runOpenRouter, image: runOpenRouterImage },
 };
 

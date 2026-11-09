@@ -55,8 +55,12 @@ export const aiRunner: ColumnRunner<AiConfig> = {
   },
 
   async prepare(config): Promise<AiSession> {
-    if (config.providerKey !== "openrouter") {
-      throw new PermanentRunError("Re-save this legacy AI column with an OpenRouter BYOK provider and model");
+    if (
+      config.providerKey !== "openrouter"
+      && config.providerKey !== "openai"
+      && config.providerKey !== "anthropic"
+    ) {
+      throw new PermanentRunError("Re-save this legacy AI column with a configured AI provider and model");
     }
     const provider = getAiProvider(config.providerKey);
     const model = getAiModel(config.providerKey, config.modelKey, config.useCase);
@@ -71,7 +75,8 @@ export const aiRunner: ColumnRunner<AiConfig> = {
     if (!invoke) throw new PermanentRunError(`${provider.name} is not available`);
 
     const settings = await getByokSettings();
-    const connection = settings.connectionId ? await getAiConnection(settings.connectionId) : null;
+    const targetConnectionId = config.connectionId || settings.connectionId;
+    const connection = targetConnectionId ? await getAiConnection(targetConnectionId) : null;
     if (!connection || !connection.verified || connection.providerKey !== config.providerKey) {
       throw new PermanentRunError(`Connect a verified ${provider.name} account`);
     }

@@ -6,7 +6,10 @@ export const dynamic = "force-dynamic";
 
 export default function AiSettingsPage() {
   return (
-    <SettingsPage title="AI provider" description="The OpenRouter connection and models every AI feature uses.">
+    <SettingsPage
+      title="AI provider"
+      description="Configure OpenAI Responses (/v1/responses), Anthropic Messages (/v1/messages), or OpenRouter with custom BaseURL, API key, model discovery, and live test calls."
+    >
       <ByokSettingsClient />
     </SettingsPage>
   );

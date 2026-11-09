@@ -1,20 +1,14 @@
 import "server-only";
 
-import Anthropic from "@anthropic-ai/sdk";
-import { PermanentRunError } from "@/lib/grid/runners/types";
+import { PermanentRunError, RetryableRunError } from "@/lib/grid/runners/types";
+import { invokeAnthropicMessages } from "./custom-providers";
 import { jsonInstruction, parseJsonResponse, type AiRunner } from "./types";
 
 /**
- * Claude, through the official SDK.
- *
- * Notes that are easy to get wrong on the current model family:
- *  - Thinking is adaptive; `budget_tokens` is rejected outright.
- *  - Assistant prefill is rejected, so examples go in as user/assistant turns.
- *  - Web research uses Anthropic's server-side search tool, so there is no
- *    scraping loop to run here — the tool executes on Anthropic's side and
- *    the citations come back in the same response.
+ * Claude and Anthropic Messages API (/v1/messages) compatible models.
  */
 export const runAnthropic: AiRunner = async ({
+  config,
   model,
   credentials,
   prompt,
@@ -23,8 +17,6 @@ export const runAnthropic: AiRunner = async ({
   timeoutMs,
   signal,
 }) => {
-  const client = new Anthropic({ apiKey: credentials.apiKey, timeout: timeoutMs });
-
   const system = [
     "You are filling in one row of a spreadsheet.",
     "Answer only from what you are given or can verify. If a value cannot be",
@@ -32,7 +24,7 @@ export const runAnthropic: AiRunner = async ({
     schema ? jsonInstruction(schema) : "Respond with the answer only — no preamble.",
   ].join("\n");
 
-  const messages: Anthropic.MessageParam[] = [];
+  const messages: Array<{ role: "user" | "assistant"; content: string }> = [];
   for (const example of examples) {
     messages.push({ role: "user", content: example.input });
     messages.push({ role: "assistant", content: example.response });
@@ -40,50 +32,52 @@ export const runAnthropic: AiRunner = async ({
   messages.push({ role: "user", content: prompt });
 
   try {
-    const response = await client.messages.create(
-      {
-        model: model.modelId,
-        max_tokens: model.maxOutputTokens ?? 16000,
-        system,
-        messages,
-        thinking: { type: "adaptive" },
-        ...(model.supportsWebSearch
-          ? { tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 5 }] }
-          : {}),
-      },
-      { signal },
-    );
+    const { result, requestBody } = await invokeAnthropicMessages({
+      credentials,
+      model: model.modelId,
+      maxTokens: config.maxTokens ?? model.maxOutputTokens ?? 8192,
+      system,
+      messages,
+      ...(schema
+        ? {
+            tools: [
+              {
+                name: "fill_row",
+                description: "Submit the structured row values.",
+                input_schema: schema,
+              },
+            ],
+            toolChoice: { type: "auto" },
+          }
+        : {}),
+      timeoutMs,
+      signal,
+    });
 
-    // A safety decline arrives as HTTP 200 with stop_reason "refusal", so it
-    // has to be checked before reading content or the cell silently blanks.
-    if (response.stop_reason === "refusal") {
-      throw new PermanentRunError(
-        `Claude declined this prompt${response.stop_details?.category ? ` (${response.stop_details.category})` : ""}`,
-      );
+    if (result.stopReason === "refusal") {
+      throw new PermanentRunError("Claude declined this prompt");
     }
 
-    const text = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === "text")
-      .map((block) => block.text)
-      .join("")
-      .trim();
+    const toolCall = result.toolCalls.find((call) => call.name === "fill_row") ?? result.toolCalls[0];
+    const text = (toolCall?.arguments ?? result.text ?? "").trim();
 
     return {
       value: schema ? parseJsonResponse(text) : text,
-      usage: {
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens,
-      },
+      usage: result.usage,
+      raw: result.raw,
+      request: requestBody,
     };
   } catch (cause) {
-    if (cause instanceof PermanentRunError) throw cause;
-    // A bad key or a model the account cannot reach will never succeed on a
-    // retry, so it must not be re-queued for every remaining row.
-    if (cause instanceof Anthropic.AuthenticationError) {
+    if (cause instanceof PermanentRunError || cause instanceof RetryableRunError) throw cause;
+    const status = (cause as { status?: number })?.status;
+    if (status === 429 || (typeof status === "number" && status >= 500)) {
+      throw new RetryableRunError(cause instanceof Error ? cause.message : "Anthropic Messages temporary error");
+    }
+    if (status === 401 || status === 403) {
       throw new PermanentRunError("Anthropic rejected this API key");
     }
-    if (cause instanceof Anthropic.BadRequestError || cause instanceof Anthropic.NotFoundError) {
-      throw new PermanentRunError(cause.message);
+    if (status === 400 || status === 404) {
+      throw new PermanentRunError(cause instanceof Error ? cause.message : "Anthropic Messages rejected the request");
     }
     throw cause;
   }

@@ -37,6 +37,13 @@ async function assertUsable(input: AiColumnInput) {
   if (!connection || connection.providerKey !== input.providerKey || !connection.verified) {
     throw new Error("Connect a verified account for this provider before saving");
   }
+  if (input.providerKey === "openai" || input.providerKey === "anthropic") {
+    const credentials = await getAiCredentials(connection.id);
+    if (!credentials?.apiKey) {
+      throw new Error(`Reconnect ${input.providerKey === "openai" ? "OpenAI Responses" : "Anthropic Messages"} in AI Settings`);
+    }
+    return model;
+  }
   if (input.providerKey === "openrouter") {
     const settings = await getByokSettings();
     if (!input.upstreamProvider || !settings.modelsByProvider[input.upstreamProvider]?.includes(input.modelKey)) {
