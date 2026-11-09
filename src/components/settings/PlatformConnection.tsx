@@ -439,7 +439,12 @@ function IntegrationDialog({
 }) {
   const router = useRouter();
   const [values, setValues] = useState<Record<string, string>>(() =>
-    Object.fromEntries(integration.fields.map((field) => [field.key, field.secret ? "" : (status?.values[field.key] ?? "")])),
+    Object.fromEntries(
+      integration.fields.map((field) => [
+        field.key,
+        field.secret ? "" : (status?.values[field.key] ?? field.defaultValue ?? ""),
+      ]),
+    ),
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -7,6 +7,8 @@ import {
   RiClockwiseLine,
   RiDeleteBinLine,
   RiErrorWarningLine,
+  RiKey2Line,
+  RiMailDownloadLine,
   RiMailSendLine,
   RiMoreLine,
   RiPenNibLine,
@@ -25,6 +27,7 @@ import type { mailboxes } from "@/lib/outreach/schema";
 import { cn } from "@/utils/cn";
 import WorkingHoursModal from "./WorkingHoursModal";
 import SignatureModal from "./SignatureModal";
+import ConnectMailboxDialog from "./ConnectMailboxDialog";
 import { useDialogs } from "@/components/DialogProvider";
 
 type Mailbox = typeof mailboxes.$inferSelect;
@@ -85,12 +88,40 @@ function MailboxTableRow({ mailbox }: { mailbox: Mailbox }) {
   const [testSendResult, setTestSendResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [showHours, setShowHours] = useState(false);
   const [showSignature, setShowSignature] = useState(false);
+  const [showCredentials, setShowCredentials] = useState(false);
 
   async function handleRetest() {
     setBusy(true);
+    setTestSendResult(null);
     try {
-      await fetch(`/api/outreach/mailboxes/${mailbox.id}`, { method: "POST" });
+      const res = await fetch(`/api/outreach/mailboxes/${mailbox.id}`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok !== false) {
+        setTestSendResult({ ok: true, text: "Connection verified (SMTP + IMAP)" });
+      }
       router.refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSyncInbox() {
+    setBusy(true);
+    setTestSendResult(null);
+    try {
+      const res = await fetch(`/api/outreach/mailboxes/${mailbox.id}/sync`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        setTestSendResult({ ok: false, text: `Sync failed: ${data.error ?? "unknown error"}` });
+      } else {
+        setTestSendResult({
+          ok: true,
+          text: `Inbox synced (${data.synced ?? 0} new ${data.synced === 1 ? "reply" : "replies"})`,
+        });
+      }
+      router.refresh();
+    } catch {
+      setTestSendResult({ ok: false, text: "Sync failed: network error" });
     } finally {
       setBusy(false);
     }
@@ -239,11 +270,21 @@ function MailboxTableRow({ mailbox }: { mailbox: Mailbox }) {
                 Test connection
               </Dropdown.Item>
               {connected && (
+                <Dropdown.Item onSelect={() => void handleSyncInbox()}>
+                  <Dropdown.ItemIcon as={RiMailDownloadLine} />
+                  Sync inbox now
+                </Dropdown.Item>
+              )}
+              {connected && (
                 <Dropdown.Item onSelect={() => void handleSendTest()}>
                   <Dropdown.ItemIcon as={RiMailSendLine} />
                   Send test email
                 </Dropdown.Item>
               )}
+              <Dropdown.Item onSelect={() => setShowCredentials(true)}>
+                <Dropdown.ItemIcon as={RiKey2Line} />
+                SMTP / IMAP credentials
+              </Dropdown.Item>
               <Dropdown.Item onSelect={() => setShowHours(true)}>
                 <Dropdown.ItemIcon as={RiTimeLine} />
                 Sending hours
@@ -279,6 +320,13 @@ function MailboxTableRow({ mailbox }: { mailbox: Mailbox }) {
             initial={mailbox.signatureHtml}
             onClose={() => setShowSignature(false)}
             onSaved={() => router.refresh()}
+          />
+        )}
+        {showCredentials && (
+          <ConnectMailboxDialog
+            initialEmail={mailbox.emailAddress}
+            initialDisplayName={mailbox.displayName ?? ""}
+            onClose={() => setShowCredentials(false)}
           />
         )}
       </Table.Cell>

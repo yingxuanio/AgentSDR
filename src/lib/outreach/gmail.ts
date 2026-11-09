@@ -12,6 +12,14 @@ import { requirePlatformCredentials } from "@/lib/platform/credentials";
 import { googleServiceAccount } from "@/lib/platform/clients";
 import type { EmailAddress } from "@/lib/email/recipients";
 import { parseAddressHeader } from "./addressHeader";
+import {
+  fetchImapMessageRecipients,
+  fetchNewImapInboundMessages,
+  resolveMailboxSmtpConfig,
+  sendSmtpEmail,
+  shouldUseSmtpImap,
+  testSmtpImapMailbox,
+} from "./smtpImap";
 
 async function jwtFor(subject: string, scopes: string[]) {
   const key = googleServiceAccount(await requirePlatformCredentials("google"));
@@ -34,6 +42,17 @@ export type MailboxConnectionTest =
  */
 export async function testMailboxConnection(emailAddress: string): Promise<MailboxConnectionTest> {
   try {
+    const smtpConfig = await resolveMailboxSmtpConfig(emailAddress);
+    if (smtpConfig) {
+      return await testSmtpImapMailbox(smtpConfig);
+    }
+    if (await shouldUseSmtpImap(emailAddress)) {
+      return {
+        ok: false,
+        error: `SMTP/IMAP password is required for ${emailAddress}. Edit the mailbox or set a default password in Settings → Email → Connection.`,
+      };
+    }
+
     const auth = await jwtFor(emailAddress, ["https://www.googleapis.com/auth/gmail.readonly"]);
     const gmail = google.gmail({ version: "v1", auth });
     const profile = await gmail.users.getProfile({ userId: "me" });
@@ -136,6 +155,16 @@ export async function buildRawEmailMessage(params: SendEmailParams): Promise<Buf
 export async function sendEmail(params: SendEmailParams): Promise<SendEmailResult> {
   const { from, threadId } = params;
 
+  const smtpConfig = await resolveMailboxSmtpConfig(from);
+  if (smtpConfig) {
+    return await sendSmtpEmail(smtpConfig, params);
+  }
+  if (await shouldUseSmtpImap(from)) {
+    throw new Error(
+      `SMTP password is not configured for ${from}. Add the mailbox password in Settings → Email → Accounts.`,
+    );
+  }
+
   const auth = await jwtFor(from, ["https://www.googleapis.com/auth/gmail.send"]);
   const gmail = google.gmail({ version: "v1", auth });
 
@@ -178,6 +207,16 @@ export type WatchResult = { ok: true; expiration: string | null; historyId: stri
  */
 export async function registerWatch(emailAddress: string, topicName: string): Promise<WatchResult> {
   try {
+    const smtpConfig = await resolveMailboxSmtpConfig(emailAddress);
+    if (smtpConfig || (await shouldUseSmtpImap(emailAddress))) {
+      // SMTP/IMAP mailboxes use IMAP IDLE + UID polling rather than Gmail Pub/Sub watch.
+      return {
+        ok: true,
+        expiration: String(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        historyId: null,
+      };
+    }
+
     const auth = await jwtFor(emailAddress, ["https://www.googleapis.com/auth/gmail.readonly"]);
     const gmail = google.gmail({ version: "v1", auth });
     const res = await gmail.users.watch({
@@ -248,6 +287,14 @@ export async function fetchNewInboundMessages(
   emailAddress: string,
   startHistoryId: string,
 ): Promise<{ messages: InboundMessage[]; newHistoryId: string | null }> {
+  const smtpConfig = await resolveMailboxSmtpConfig(emailAddress);
+  if (smtpConfig) {
+    return await fetchNewImapInboundMessages(smtpConfig, startHistoryId);
+  }
+  if (await shouldUseSmtpImap(emailAddress)) {
+    throw new Error(`IMAP password is not configured for ${emailAddress}.`);
+  }
+
   const auth = await jwtFor(emailAddress, ["https://www.googleapis.com/auth/gmail.readonly"]);
   const gmail = google.gmail({ version: "v1", auth });
 
@@ -314,6 +361,14 @@ export async function fetchMessageRecipients(
   emailAddress: string,
   gmailMessageId: string,
 ): Promise<{ to: EmailAddress[]; cc: EmailAddress[]; replyTo: EmailAddress[] } | null> {
+  const smtpConfig = await resolveMailboxSmtpConfig(emailAddress);
+  if (smtpConfig) {
+    return await fetchImapMessageRecipients(smtpConfig, gmailMessageId);
+  }
+  if (await shouldUseSmtpImap(emailAddress)) {
+    return null;
+  }
+
   const auth = await jwtFor(emailAddress, ["https://www.googleapis.com/auth/gmail.readonly"]);
   const gmail = google.gmail({ version: "v1", auth });
   try {

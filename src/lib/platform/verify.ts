@@ -2,6 +2,7 @@ import "server-only";
 
 import { HeadBucketCommand, S3Client } from "@aws-sdk/client-s3";
 import { google } from "googleapis";
+import { verifySmtpImapPlatform } from "@/lib/outreach/smtpImap";
 import type { PlatformCredentials, PlatformKey } from "./catalog";
 import { googleServiceAccount, r2Client } from "./clients";
 
@@ -16,6 +17,7 @@ export async function verifyPlatformCredentials<K extends PlatformKey>(
 ): Promise<void> {
   if (key === "unipile") return verifyUnipile(credentials as PlatformCredentials["unipile"]);
   if (key === "google") return verifyGoogle(credentials as PlatformCredentials["google"]);
+  if (key === "smtp") return verifySmtpImapPlatform(credentials as PlatformCredentials["smtp"]);
   if (key === "r2") return verifyR2(credentials as PlatformCredentials["r2"]);
   if (key === "gologin") return verifyGoLogin(credentials as PlatformCredentials["gologin"]);
   if (key === "calcom") return verifyCalcom(credentials as PlatformCredentials["calcom"]);

@@ -22,7 +22,16 @@ export async function GET(request: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     return await withOrgContext(req, async () => {
-      let body: { emailAddress?: string; displayName?: string; signatureHtml?: string };
+      let body: {
+        emailAddress?: string;
+        displayName?: string;
+        signatureHtml?: string;
+        password?: string;
+        smtpHost?: string;
+        smtpPort?: string | number;
+        imapHost?: string;
+        imapPort?: string | number;
+      };
       try {
         body = await req.json();
       } catch {
@@ -37,6 +46,11 @@ export async function POST(req: NextRequest) {
         emailAddress: body.emailAddress,
         displayName: body.displayName,
         signatureHtml: body.signatureHtml,
+        password: body.password,
+        smtpHost: body.smtpHost,
+        smtpPort: body.smtpPort,
+        imapHost: body.imapHost,
+        imapPort: body.imapPort,
       });
       if (!result.ok) {
         return NextResponse.json({ ok: false, error: result.error }, { status: 422 });

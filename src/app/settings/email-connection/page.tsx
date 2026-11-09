@@ -6,7 +6,13 @@ export const dynamic = "force-dynamic";
 export default function Page() {
   return (
     <ConnectionSettingsPage
-      platforms={[{ platform: "google" }]}
+      platforms={[
+        {
+          platform: "smtp",
+          note: "Connect Aliyun Enterprise Mail (smtp.qiye.aliyun.com / imap.qiye.aliyun.com) or any standard SMTP/IMAP mail server with real-time IMAP IDLE and 60s UID reply sync.",
+        },
+        { platform: "google" },
+      ]}
       comingSoon={[
         {
           name: "Microsoft Outlook",
@@ -16,7 +22,7 @@ export default function Page() {
         },
       ]}
       title="Email connection"
-      description="The Google Workspace service account that sends and reads Gmail for every mailbox in Email → Accounts. Microsoft Outlook is coming soon."
+      description="Connect an SMTP / IMAP mail server (such as Aliyun Enterprise Mail) or a Google Workspace service account to power every mailbox in Email → Accounts."
     />
   );
 }

@@ -111,6 +111,15 @@ export async function requirePlatformCredentials<K extends PlatformKey>(
 }
 
 export async function isPlatformConnected(key: PlatformKey): Promise<boolean> {
+  if (key === "google") {
+    const [googleCreds, smtpCreds] = await Promise.all([load("google"), load("smtp")]);
+    if (googleCreds !== null || smtpCreds !== null) return true;
+    const orgId = currentOrganizationId();
+    const res = await db.execute<{ exists: boolean }>(
+      sql`SELECT EXISTS(SELECT 1 FROM outreach_mailboxes WHERE organization_id = ${orgId}::uuid) AS exists`,
+    );
+    return Boolean(res[0]?.exists);
+  }
   return (await load(key)) !== null;
 }
 
@@ -154,7 +163,7 @@ export async function savePlatformIntegration(key: PlatformKey, input: Record<st
   const merged: Record<string, string> = {};
   for (const field of integration.fields) {
     const given = String(input[field.key] ?? "").trim();
-    merged[field.key] = given || (field.secret ? (existing[field.key] ?? "") : "");
+    merged[field.key] = given || (field.secret ? (existing[field.key] ?? "") : (field.defaultValue ?? ""));
     if (merged[field.key].length > 16_384) throw new Error(`${field.label} is too long`);
   }
   const missing = integration.fields.find((field) => field.required && !merged[field.key]);
@@ -289,6 +298,17 @@ function normalize<K extends PlatformKey>(key: K, raw: Record<string, string>): 
       clientEmail: text("clientEmail"),
       privateKey: text("privateKey"),
       gmailWatchTopic: text("gmailWatchTopic"),
+    };
+    return value as PlatformCredentials[K];
+  }
+  if (key === "smtp") {
+    const value: PlatformCredentials["smtp"] = {
+      smtpHost: text("smtpHost") || "smtp.qiye.aliyun.com",
+      smtpPort: text("smtpPort") || "465",
+      imapHost: text("imapHost") || "imap.qiye.aliyun.com",
+      imapPort: text("imapPort") || "993",
+      defaultEmail: text("defaultEmail").toLowerCase(),
+      defaultPassword: text("defaultPassword"),
     };
     return value as PlatformCredentials[K];
   }
