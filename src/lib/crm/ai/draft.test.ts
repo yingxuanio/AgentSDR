@@ -129,6 +129,23 @@ describe("CRM draft prompt", () => {
     } })), /reviewer feedback is required/i);
   });
 
+  test("an initial draft or failed-draft recovery with operator feedback succeeds without a previous draft body", () => {
+    const initialWithFeedback = buildDraftPrompt(fixture({
+      recentConversation: [],
+      revision: {
+        previousDraft: { subject: null, bodyText: "" },
+        reviewerFeedback: "Focus on cross-border treasury automation for Hong Kong teams.",
+      },
+    }));
+
+    assert.doesNotMatch(initialWithFeedback.userPrompt, /rejected the previous draft/);
+    assert.match(initialWithFeedback.userPrompt, /revisionRequest\.reviewerFeedback is an instruction from the operator/);
+    assert.match(initialWithFeedback.userPrompt, /Focus on cross-border treasury automation/);
+    assert.deepEqual(initialWithFeedback.snapshot.revisionRequest, {
+      reviewerFeedback: "Focus on cross-border treasury automation for Hong Kong teams.",
+    });
+  });
+
   test("uses closed, channel-specific schemas", () => {
     const email = draftJsonSchema("email") as {
       additionalProperties: boolean;

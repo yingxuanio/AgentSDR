@@ -68,7 +68,7 @@ export type AcceptedDraftClassification = {
  * sees what it wrote and what the reviewer wants changed.
  */
 export type DraftRevisionRequest = {
-  previousDraft: { subject: string | null; bodyText: string };
+  previousDraft?: { subject: string | null; bodyText?: string | null } | null;
   reviewerFeedback: string;
 };
 
@@ -409,12 +409,18 @@ export function buildDraftPrompt(input: DraftPromptInput): BuiltDraftPrompt {
   if (input.totalSteps && Number.isInteger(input.totalSteps) && input.totalSteps >= step.position) {
     snapshot.sequenceProgress = draftSequenceProgress(step, input.totalSteps, input.recentConversation);
   }
+  const previousBodyText = cleanOptionalText(input.revision?.previousDraft?.bodyText);
+  const previousSubject = cleanOptionalText(input.revision?.previousDraft?.subject);
   const revision = input.revision
     ? {
-        previousDraft: {
-          subject: cleanOptionalText(input.revision.previousDraft.subject),
-          bodyText: cleanRequiredText(input.revision.previousDraft.bodyText, "Previous CRM draft body"),
-        },
+        ...(previousBodyText || previousSubject
+          ? {
+              previousDraft: {
+                subject: previousSubject,
+                bodyText: previousBodyText,
+              },
+            }
+          : {}),
         reviewerFeedback: cleanRequiredText(input.revision.reviewerFeedback, "CRM draft reviewer feedback"),
       }
     : null;
@@ -431,7 +437,9 @@ export function buildDraftPrompt(input: DraftPromptInput): BuiltDraftPrompt {
     systemPrompt: withAiInstructions(SYSTEM_PROMPT, "draft", input.instructions),
     userPrompt: [
       revision
-        ? "A human reviewer rejected the previous draft for this CRM sequence step. Write a replacement from this server-assembled context. revisionRequest.previousDraft is what they rejected and revisionRequest.reviewerFeedback is what they want changed: the feedback is an instruction from the operator — follow it within the step and channel constraints, keep what it does not ask to change, and do not return the previous draft again."
+        ? previousBodyText
+          ? "A human reviewer rejected the previous draft for this CRM sequence step. Write a replacement from this server-assembled context. revisionRequest.previousDraft is what they rejected and revisionRequest.reviewerFeedback is what they want changed: the feedback is an instruction from the operator — follow it within the step and channel constraints, keep what it does not ask to change, and do not return the previous draft again."
+          : "Prepare the current CRM sequence-step draft from this server-assembled context. revisionRequest.reviewerFeedback is an instruction from the operator — follow it within the step and channel constraints:"
         : "Prepare the current CRM sequence-step draft from this server-assembled context:",
       JSON.stringify(snapshot, null, 2),
     ].join("\n\n"),

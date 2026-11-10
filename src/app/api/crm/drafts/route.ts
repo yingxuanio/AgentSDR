@@ -1,12 +1,18 @@
 import type { NextRequest } from "next/server";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { companies, people } from "@/lib/leads/schema";
 import { crmConversations, crmDrafts, crmRecords, type CrmDraftStatus } from "@/lib/crm/schema";
 import { draftInOrg } from "@/lib/crm/records";
 import { crmOperationErrorResponse, requireInteger } from "@/lib/crm/api";
 import { parseOptionalText, parseRequiredText, readCrmJson } from "@/lib/crm/categories";
-import { createOrGenerateInitialDraft, regenerateDraft, updateDraft } from "@/lib/crm/drafts";
+import {
+  createOrGenerateInitialDraft,
+  regenerateDraft,
+  resolveCompanyCode,
+  selectRegenerateTargetDrafts,
+  updateDraft,
+} from "@/lib/crm/drafts";
 import { requireCrmMutationContext } from "@/lib/crm/http";
 import { requireOrgContext } from "@/lib/auth/context";
 import { runInOrganization } from "@/lib/tenancy/scope";
@@ -38,7 +44,9 @@ type DraftListItem = {
   updatedAt: string;
 };
 
-async function loadOrgDrafts(statusFilter = "awaiting_review"): Promise<DraftListItem[]> {
+async function loadOrgDrafts(
+  statusFilter: string | readonly CrmDraftStatus[] = "awaiting_review",
+): Promise<DraftListItem[]> {
   const rows = await db
     .select({
       draft: crmDrafts,
@@ -53,15 +61,16 @@ async function loadOrgDrafts(statusFilter = "awaiting_review"): Promise<DraftLis
     .innerJoin(people, eq(people.id, crmRecords.personId))
     .leftJoin(companies, eq(companies.id, people.companyId))
     .where(
-      statusFilter === "all"
-        ? draftInOrg()
-        : and(draftInOrg(), eq(crmDrafts.status, statusFilter as CrmDraftStatus)),
+      Array.isArray(statusFilter)
+        ? and(draftInOrg(), inArray(crmDrafts.status, [...statusFilter]))
+        : statusFilter === "all"
+          ? draftInOrg()
+          : and(draftInOrg(), eq(crmDrafts.status, statusFilter as CrmDraftStatus)),
     )
     .orderBy(desc(crmDrafts.updatedAt));
 
   return rows.map((row) => {
     const reqObj = (row.draft.request ?? {}) as Record<string, unknown>;
-    const compCustom = (row.company?.custom ?? row.company?.raw ?? {}) as Record<string, unknown>;
     return {
       id: row.draft.id,
       crmRecordId: row.draft.crmRecordId,
@@ -94,7 +103,7 @@ async function loadOrgDrafts(statusFilter = "awaiting_review"): Promise<DraftLis
             id: row.company.id,
             name: row.company.name,
             domain: row.company.domain,
-            code: typeof compCustom.x_code === "string" ? compCustom.x_code : null,
+            code: resolveCompanyCode(row.company),
           }
         : null,
       updatedAt: row.draft.updatedAt.toISOString(),
@@ -122,8 +131,6 @@ async function handleBatchOrSingleMutate(request: NextRequest) {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       return Response.json({ error: "Request body must be a JSON object" }, { status: 400 });
     }
-
-    const allDrafts = await loadOrgDrafts("awaiting_review");
 
     // Mode 0: Initial draft generation / creation (`{ action: "generate" | "create", recordId?, personId?, email?, companyCode?, fromEmail?, subject?, bodyText?, feedback? }`)
     if (body.action === "generate" || body.action === "create") {
@@ -172,41 +179,14 @@ async function handleBatchOrSingleMutate(request: NextRequest) {
       );
     }
 
-    // Mode 1: Batch AI regenerate by instruction (`{ action: "regenerate", feedback: "...", draftIds?: [...], companyCodes?: [...] }`)
+    // Mode 1: Batch AI regenerate by instruction (`{ action: "regenerate", feedback?: "...", draftIds?: [...], companyCodes?: [...] }`)
     if (body.action === "regenerate") {
-      const feedback = parseRequiredText(body.feedback, "feedback", 4_000);
-      const idFilter = Array.isArray(body.draftIds)
-        ? new Set(body.draftIds.map((v) => String(v).trim()))
-        : null;
-      const codeFilter = Array.isArray(body.companyCodes)
-        ? new Set(body.companyCodes.map((v) => String(v).trim().toUpperCase()))
-        : null;
-      const personIdFilter = Array.isArray(body.personIds)
-        ? new Set(body.personIds.map((v) => String(v).trim()))
-        : null;
-      const recordIdFilter = Array.isArray(body.recordIds)
-        ? new Set(body.recordIds.map((v) => String(v).trim()))
-        : null;
-      const emailFilter = Array.isArray(body.emails)
-        ? new Set(body.emails.map((v) => String(v).trim().toLowerCase()))
-        : null;
-
-      const targets = allDrafts.filter((d) => {
-        if (idFilter && idFilter.size > 0 && !idFilter.has(d.id)) return false;
-        if (codeFilter && codeFilter.size > 0 && (!d.company?.code || !codeFilter.has(d.company.code.toUpperCase()))) {
-          return false;
-        }
-        if (personIdFilter && personIdFilter.size > 0 && !personIdFilter.has(d.person.id)) {
-          return false;
-        }
-        if (recordIdFilter && recordIdFilter.size > 0 && !recordIdFilter.has(d.crmRecordId)) {
-          return false;
-        }
-        if (emailFilter && emailFilter.size > 0 && (!d.toEmail || !emailFilter.has(d.toEmail.toLowerCase()))) {
-          return false;
-        }
-        return true;
-      });
+      const feedback =
+        typeof body.feedback === "string" && body.feedback.trim() === ""
+          ? null
+          : (parseOptionalText(body.feedback, "feedback", 4_000) ?? null);
+      const recoverableDrafts = await loadOrgDrafts(["awaiting_review", "failed"]);
+      const targets = selectRegenerateTargetDrafts(recoverableDrafts, body);
 
       const results: Array<{ id: string; companyCode: string | null; status: "ok" | "error"; subject?: string | null; revision?: number; error?: string }> = [];
       for (const target of targets) {
@@ -232,6 +212,7 @@ async function handleBatchOrSingleMutate(request: NextRequest) {
     }
 
     // Mode 2: Direct replacement of one or multiple drafts (`{ drafts: [...] }` or single `{ id | companyCode | toEmail, subject?, bodyText }`)
+    const allDrafts = await loadOrgDrafts(["awaiting_review", "failed"]);
     const items = Array.isArray(body.drafts) ? (body.drafts as Record<string, unknown>[]) : [body];
     const updatedDrafts = [];
 
@@ -241,12 +222,13 @@ async function handleBatchOrSingleMutate(request: NextRequest) {
       const targetCode = typeof item.companyCode === "string" ? item.companyCode.trim().toUpperCase() : "";
       const targetEmail = typeof item.toEmail === "string" ? item.toEmail.trim().toLowerCase() : "";
 
-      const matched = allDrafts.find((d) => {
+      const candidates = allDrafts.filter((d) => {
         if (targetId && d.id === targetId) return true;
         if (targetCode && d.company?.code?.toUpperCase() === targetCode) return true;
         if (targetEmail && d.toEmail?.toLowerCase() === targetEmail) return true;
         return false;
       });
+      const matched = candidates.find((d) => d.status === "awaiting_review") ?? candidates[0];
 
       if (!matched) {
         return Response.json(

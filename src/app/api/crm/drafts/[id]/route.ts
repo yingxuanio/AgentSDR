@@ -6,7 +6,7 @@ import { crmDrafts, crmRecords } from "@/lib/crm/schema";
 import { draftInOrg } from "@/lib/crm/records";
 import { crmOperationErrorResponse, requireInteger } from "@/lib/crm/api";
 import { assertExactKeys, assertObject, parseOptionalText, parseRequiredText, parseUuid, readCrmJson } from "@/lib/crm/categories";
-import { discardDraft, updateDraft } from "@/lib/crm/drafts";
+import { discardDraft, resolveCompanyCode, updateDraft } from "@/lib/crm/drafts";
 import { CrmNotFoundError } from "@/lib/crm/repository";
 import { requireCrmMutationContext } from "@/lib/crm/http";
 import { requireOrgContext } from "@/lib/auth/context";
@@ -44,10 +44,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
               id: row.company.id,
               name: row.company.name,
               domain: row.company.domain,
-              code:
-                (row.company.custom as Record<string, unknown> | null)?.x_code ??
-                (row.company.raw as Record<string, unknown> | null)?.x_code ??
-                null,
+              code: resolveCompanyCode(row.company),
             }
           : null,
       });

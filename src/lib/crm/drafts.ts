@@ -451,6 +451,7 @@ async function finishGeneratedDraft(
         ? generated.response as Record<string, unknown>
         : { value: generated.response },
       error: null,
+      autoSendAt: null,
       updatedAt: now,
     }).where(eq(crmDrafts.id, draft.id)).returning();
     if (!updated) throw new Error("Generated CRM draft update did not return a row");
@@ -585,22 +586,38 @@ const FALLBACK_DRAFT_STATUSES = ["generating", "awaiting_review", "failed"] as c
 async function loadFallbackDraftContext(
   tx: CrmTransaction,
   recordId: string,
+  targetDraftId?: string,
 ): Promise<PreparedDraft | null> {
   const record = await lockCrmRecord(tx, recordId);
   if (await isPersonDoNotContact(tx, record.personId)) return null;
 
-  const [existing] = await tx
-    .select()
-    .from(crmDrafts)
-    .where(and(
-      eq(crmDrafts.crmRecordId, record.id),
-      isNull(crmDrafts.sequenceStepRunId),
-      eq(crmDrafts.expectedContextVersion, record.contextVersion),
-      inArray(crmDrafts.status, [...FALLBACK_DRAFT_STATUSES]),
-    ))
-    .orderBy(desc(crmDrafts.createdAt))
-    .limit(1)
-    .for("update");
+  let existing: CrmDraft | undefined;
+  if (targetDraftId) {
+    [existing] = await tx
+      .select()
+      .from(crmDrafts)
+      .where(and(
+        eq(crmDrafts.id, targetDraftId),
+        eq(crmDrafts.crmRecordId, record.id),
+        isNull(crmDrafts.sequenceStepRunId),
+        inArray(crmDrafts.status, [...FALLBACK_DRAFT_STATUSES]),
+      ))
+      .limit(1)
+      .for("update");
+  }
+  if (!existing) {
+    [existing] = await tx
+      .select()
+      .from(crmDrafts)
+      .where(and(
+        eq(crmDrafts.crmRecordId, record.id),
+        isNull(crmDrafts.sequenceStepRunId),
+        inArray(crmDrafts.status, [...FALLBACK_DRAFT_STATUSES]),
+      ))
+      .orderBy(desc(crmDrafts.updatedAt), desc(crmDrafts.createdAt))
+      .limit(1)
+      .for("update");
+  }
 
   let conversationRow: typeof crmConversations.$inferSelect | undefined;
   if (record.latestInboundMessageId) {
@@ -649,8 +666,12 @@ async function loadFallbackDraftContext(
   let draft: CrmDraft | undefined;
   if (existing) {
     [draft] = await tx.update(crmDrafts).set({
+      conversationId: conversationRow.id,
+      replyForMessageId: record.latestInboundMessageId,
+      expectedContextVersion: record.contextVersion,
       status: "generating",
       error: null,
+      autoSendAt: null,
       revision: existing.revision + 1,
       updatedAt: now,
     }).where(eq(crmDrafts.id, existing.id)).returning();
@@ -694,12 +715,15 @@ export async function generateFallbackDraft(
   recordId: string,
   dependencies: { complete?: DraftCompletion } = {},
   revision: DraftRevisionRequest | null = null,
+  options: { targetDraftId?: string; personRequested?: boolean } = {},
 ): Promise<CrmDraft | null> {
-  const prepared = await withCrmTransaction((tx) => loadFallbackDraftContext(tx, recordId));
+  const prepared = await withCrmTransaction((tx) =>
+    loadFallbackDraftContext(tx, recordId, options.targetDraftId),
+  );
   if (!prepared) return null;
   try {
     const generated = await generateCrmDraft({ ...prepared.promptInput, revision }, dependencies);
-    return await finishGeneratedDraft(prepared, generated);
+    return await finishGeneratedDraft(prepared, generated, { personRequested: options.personRequested });
   } catch (error) {
     await failDraftGeneration(prepared.draft.id, error);
     throw error;
@@ -717,6 +741,149 @@ export type InitialDraftInput = {
   bodyHtml?: string;
   feedback?: string;
 };
+
+export function resolveCompanyCode(
+  company: { custom?: Record<string, unknown> | null; raw?: Record<string, unknown> | null } | null | undefined,
+): string | null {
+  if (!company) return null;
+  const custom = (company.custom ?? {}) as Record<string, unknown>;
+  const raw = (company.raw ?? {}) as Record<string, unknown>;
+  for (const candidate of [custom.x_code, custom.company_code, raw.x_code, raw.company_code]) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
+}
+
+export function buildInitialDraftRevision(
+  input: Pick<InitialDraftInput, "subject" | "bodyText" | "feedback">,
+  existingDraft?: Pick<CrmDraft, "subject" | "editedBodyText" | "aiBodyText"> | null,
+): DraftRevisionRequest | null {
+  const reviewerFeedback = input.feedback?.trim() ?? "";
+  if (!reviewerFeedback) return null;
+  const previousBody = (
+    input.bodyText?.trim() ||
+    existingDraft?.editedBodyText?.trim() ||
+    existingDraft?.aiBodyText?.trim() ||
+    ""
+  );
+  const previousSubject = input.subject?.trim() || existingDraft?.subject?.trim() || null;
+  return {
+    previousDraft: previousBody || previousSubject
+      ? { subject: previousSubject, bodyText: previousBody || null }
+      : null,
+    reviewerFeedback,
+  };
+}
+
+export function buildRegenerateDraftRevision(
+  draft: Pick<CrmDraft, "subject" | "editedBodyText" | "aiBodyText" | "sequenceStepRunId" | "replyForMessageId">,
+  feedback?: string | null,
+): DraftRevisionRequest | null {
+  const previousBody = (draft.editedBodyText ?? draft.aiBodyText ?? "").trim();
+  const effectiveFeedback =
+    feedback?.trim() ||
+    (!draft.sequenceStepRunId && !draft.replyForMessageId && previousBody
+      ? "Refine and improve this outreach draft while preserving its core project scope, factual context, and link."
+      : "");
+  if (!effectiveFeedback) return null;
+  const previousSubject = draft.subject?.trim() || null;
+  return {
+    previousDraft: previousBody || previousSubject
+      ? { subject: previousSubject, bodyText: previousBody || null }
+      : null,
+    reviewerFeedback: effectiveFeedback,
+  };
+}
+
+export type RegenerateDraftFilterInput = {
+  draftIds?: unknown;
+  draftId?: unknown;
+  id?: unknown;
+  companyCodes?: unknown;
+  companyCode?: unknown;
+  code?: unknown;
+  personIds?: unknown;
+  personId?: unknown;
+  recordIds?: unknown;
+  recordId?: unknown;
+  emails?: unknown;
+  email?: unknown;
+  toEmail?: unknown;
+};
+
+function parseFilterSet(values: unknown[], transform?: (value: string) => string): Set<string> | null {
+  const items: string[] = [];
+  for (const raw of values) {
+    if (Array.isArray(raw)) {
+      for (const entry of raw) {
+        const clean = String(entry ?? "").trim();
+        if (clean) items.push(transform ? transform(clean) : clean);
+      }
+    } else if (typeof raw === "string" && raw.trim()) {
+      const clean = raw.trim();
+      items.push(transform ? transform(clean) : clean);
+    }
+  }
+  return items.length > 0 ? new Set(items) : null;
+}
+
+export function selectRegenerateTargetDrafts<
+  T extends {
+    id: string;
+    crmRecordId: string;
+    status: string;
+    toEmail: string | null;
+    person: { id: string };
+    company: { code: string | null } | null;
+  },
+>(drafts: readonly T[], filterInput: RegenerateDraftFilterInput): T[] {
+  const idFilter = parseFilterSet([filterInput.draftIds, filterInput.draftId, filterInput.id]);
+  const codeFilter = parseFilterSet(
+    [filterInput.companyCodes, filterInput.companyCode, filterInput.code],
+    (v) => v.toUpperCase(),
+  );
+  const personIdFilter = parseFilterSet([filterInput.personIds, filterInput.personId]);
+  const recordIdFilter = parseFilterSet([filterInput.recordIds, filterInput.recordId]);
+  const emailFilter = parseFilterSet(
+    [filterInput.emails, filterInput.email, filterInput.toEmail],
+    (v) => v.toLowerCase(),
+  );
+
+  const matched = drafts.filter((d) => {
+    if (d.status !== "awaiting_review" && d.status !== "failed") return false;
+    if (idFilter && !idFilter.has(d.id)) return false;
+    if (codeFilter && (!d.company?.code || !codeFilter.has(d.company.code.toUpperCase()))) {
+      return false;
+    }
+    if (personIdFilter && !personIdFilter.has(d.person.id)) {
+      return false;
+    }
+    if (recordIdFilter && !recordIdFilter.has(d.crmRecordId)) {
+      return false;
+    }
+    if (emailFilter && (!d.toEmail || !emailFilter.has(d.toEmail.toLowerCase()))) {
+      return false;
+    }
+    return true;
+  });
+
+  if (idFilter) {
+    return matched;
+  }
+
+  const byRecord = new Map<string, T>();
+  for (const draft of matched) {
+    const existing = byRecord.get(draft.crmRecordId);
+    if (!existing) {
+      byRecord.set(draft.crmRecordId, draft);
+    } else if (existing.status !== "awaiting_review" && draft.status === "awaiting_review") {
+      byRecord.set(draft.crmRecordId, draft);
+    }
+  }
+  return [...byRecord.values()];
+}
 
 export async function getOrCreateDefaultEmailConversation(
   tx: CrmTransaction,
@@ -761,47 +928,50 @@ export async function getOrCreateDefaultEmailConversation(
 export async function createOrGenerateInitialDraft(
   input: InitialDraftInput,
   actorRef?: string | null,
+  dependencies: { complete?: DraftCompletion } = {},
 ): Promise<{ draft: CrmDraft; created: boolean }> {
   type SetupResult =
     | { kind: "existing"; draft: CrmDraft }
-    | { kind: "manual"; draft: CrmDraft }
-    | { kind: "need_ai"; recordId: string };
+    | { kind: "manual"; draft: CrmDraft; created: boolean }
+    | { kind: "need_ai"; recordId: string; existingDraft: CrmDraft | null };
 
   const setup: SetupResult = await withCrmTransaction(async (tx): Promise<SetupResult> => {
     let recordId = input.recordId?.trim();
     let personId = input.personId?.trim();
 
-    if (!recordId && !personId) {
-      if (input.email?.trim()) {
-        const normalized = normalizeEmail(input.email.trim());
+    if (!recordId && !personId && input.email?.trim()) {
+      const normalized = normalizeEmail(input.email.trim());
+      if (normalized) {
         const [found] = await tx
           .select({ id: people.id })
           .from(people)
           .where(and(inOrg(people), sql`lower(${people.email}) = ${normalized}`))
           .limit(1);
         personId = found?.id;
-      } else if (input.companyCode?.trim()) {
-        const targetCode = input.companyCode.trim().toUpperCase();
-        const [foundComp] = await tx
-          .select({ id: companies.id })
-          .from(companies)
-          .where(and(
-            inOrg(companies),
-            or(
-              sql`upper(${companies.custom}->>'x_code') = ${targetCode}`,
-              sql`upper(${companies.raw}->>'company_code') = ${targetCode}`,
-              sql`upper(${companies.raw}->>'x_code') = ${targetCode}`,
-            ),
-          ))
+      }
+    }
+    if (!recordId && !personId && input.companyCode?.trim()) {
+      const targetCode = input.companyCode.trim().toUpperCase();
+      const [foundComp] = await tx
+        .select({ id: companies.id })
+        .from(companies)
+        .where(and(
+          inOrg(companies),
+          or(
+            sql`upper(${companies.custom}->>'x_code') = ${targetCode}`,
+            sql`upper(${companies.custom}->>'company_code') = ${targetCode}`,
+            sql`upper(${companies.raw}->>'company_code') = ${targetCode}`,
+            sql`upper(${companies.raw}->>'x_code') = ${targetCode}`,
+          ),
+        ))
+        .limit(1);
+      if (foundComp) {
+        const [foundPerson] = await tx
+          .select({ id: people.id })
+          .from(people)
+          .where(and(inOrg(people), eq(people.companyId, foundComp.id)))
           .limit(1);
-        if (foundComp) {
-          const [foundPerson] = await tx
-            .select({ id: people.id })
-            .from(people)
-            .where(and(inOrg(people), eq(people.companyId, foundComp.id)))
-            .limit(1);
-          personId = foundPerson?.id;
-        }
+        personId = foundPerson?.id;
       }
     }
 
@@ -826,33 +996,67 @@ export async function createOrGenerateInitialDraft(
         eq(crmDrafts.crmRecordId, record.id),
         eq(crmDrafts.status, "awaiting_review"),
       ))
-      .orderBy(desc(crmDrafts.createdAt))
+      .orderBy(desc(crmDrafts.updatedAt), desc(crmDrafts.createdAt))
       .limit(1);
 
     if (existingAwaiting) {
       return { kind: "existing", draft: existingAwaiting };
     }
 
+    const [existingRecoverable] = await tx
+      .select()
+      .from(crmDrafts)
+      .where(and(
+        eq(crmDrafts.crmRecordId, record.id),
+        isNull(crmDrafts.sequenceStepRunId),
+        inArray(crmDrafts.status, ["failed", "generating"]),
+      ))
+      .orderBy(desc(crmDrafts.updatedAt), desc(crmDrafts.createdAt))
+      .limit(1)
+      .for("update");
+
     const conversation = await getOrCreateDefaultEmailConversation(tx, record.id, input.fromEmail);
 
     if (input.bodyText?.trim()) {
       const now = new Date();
       const bodyText = input.bodyText.trim();
-      const [manualDraft] = await tx
-        .insert(crmDrafts)
-        .values({
-          crmRecordId: record.id,
-          conversationId: conversation.id,
-          replyForMessageId: null,
-          sequenceStepRunId: null,
-          expectedContextVersion: record.contextVersion,
-          channel: "email",
-          subject: input.subject?.trim() || null,
-          editedBodyText: bodyText,
-          editedBodyHtml: input.bodyHtml?.trim() || textToParagraphHtml(bodyText),
-          status: "awaiting_review",
-        })
-        .returning();
+      const bodyHtml = input.bodyHtml?.trim() || textToParagraphHtml(bodyText);
+      const subject = input.subject?.trim() || existingRecoverable?.subject || null;
+      const [manualDraft] = existingRecoverable
+        ? await tx
+            .update(crmDrafts)
+            .set({
+              conversationId: conversation.id,
+              replyForMessageId: null,
+              sequenceStepRunId: null,
+              expectedContextVersion: record.contextVersion,
+              channel: "email",
+              subject,
+              editedBodyText: bodyText,
+              editedBodyHtml: bodyHtml,
+              status: "awaiting_review",
+              error: null,
+              autoSendAt: null,
+              revision: existingRecoverable.revision + 1,
+              updatedAt: now,
+            })
+            .where(eq(crmDrafts.id, existingRecoverable.id))
+            .returning()
+        : await tx
+            .insert(crmDrafts)
+            .values({
+              crmRecordId: record.id,
+              conversationId: conversation.id,
+              replyForMessageId: null,
+              sequenceStepRunId: null,
+              expectedContextVersion: record.contextVersion,
+              channel: "email",
+              subject,
+              editedBodyText: bodyText,
+              editedBodyHtml: bodyHtml,
+              status: "awaiting_review",
+            })
+            .returning();
 
       if (!manualDraft) throw new Error("Draft insertion did not return a row");
 
@@ -873,28 +1077,28 @@ export async function createOrGenerateInitialDraft(
         contextVersion: record.contextVersion,
       });
 
-      return { kind: "manual", draft: manualDraft };
+      return { kind: "manual", draft: manualDraft, created: !existingRecoverable };
     }
 
-    return { kind: "need_ai", recordId: record.id };
+    return { kind: "need_ai", recordId: record.id, existingDraft: existingRecoverable ?? null };
   });
 
   if (setup.kind === "existing") {
     return { draft: setup.draft, created: false };
   }
   if (setup.kind === "manual") {
-    return { draft: setup.draft, created: true };
+    return { draft: setup.draft, created: setup.created };
   }
 
-  const revision: DraftRevisionRequest | null = input.feedback?.trim()
-    ? {
-        previousDraft: { subject: input.subject?.trim() || null, bodyText: input.bodyText?.trim() || "" },
-        reviewerFeedback: input.feedback.trim(),
-      }
-    : null;
-  const draft = await generateFallbackDraft(setup.recordId, {}, revision);
+  const revision = buildInitialDraftRevision(input, setup.existingDraft);
+  const draft = await generateFallbackDraft(
+    setup.recordId,
+    dependencies,
+    revision,
+    { targetDraftId: setup.existingDraft?.id, personRequested: true },
+  );
   if (!draft) throw new Error("Draft generation returned null (check DNC or conversation setup)");
-  return { draft, created: true };
+  return { draft, created: !setup.existingDraft };
 }
 
 export async function generateDraftForStep(
@@ -927,7 +1131,9 @@ export async function updateDraft(input: {
     const [draft] = await tx.select().from(crmDrafts)
       .where(and(draftInOrg(), eq(crmDrafts.id, input.draftId))).limit(1).for("update");
     if (!draft) throw new CrmNotFoundError("CRM draft", input.draftId);
-    if (draft.status !== "awaiting_review") throw new CrmConflictError("Only awaiting-review drafts can be edited");
+    if (!["awaiting_review", "failed"].includes(draft.status)) {
+      throw new CrmConflictError("Only awaiting-review or failed drafts can be edited");
+    }
     if (typeof input.revision === "number" && draft.revision !== input.revision) {
       throw new CrmConflictError("Draft revision is stale");
     }
@@ -939,14 +1145,25 @@ export async function updateDraft(input: {
     const cleanedRequest = draft.request && typeof draft.request === "object"
       ? Object.fromEntries(Object.entries(draft.request as Record<string, unknown>).filter(([k]) => k !== "gmailDraftId"))
       : draft.request;
+    const now = new Date();
     const [updated] = await tx.update(crmDrafts).set({
       subject,
       editedBodyText: bodyText,
       editedBodyHtml,
+      status: "awaiting_review",
+      error: null,
+      autoSendAt: null,
       request: cleanedRequest,
       revision: draft.revision + 1,
-      updatedAt: new Date(),
+      updatedAt: now,
     }).where(eq(crmDrafts.id, draft.id)).returning();
+    if (draft.status === "failed" || record.workflowState === "error") {
+      await tx.update(crmRecords).set({
+        workflowState: "action_required",
+        nextActionAt: now,
+        updatedAt: now,
+      }).where(eq(crmRecords.id, record.id));
+    }
     if (draft.conversationId) {
       await tx.execute(sql`
         UPDATE crm_conversations
@@ -985,20 +1202,14 @@ export async function regenerateDraft(
   if (!["awaiting_review", "failed"].includes(draft.status)) {
     throw new CrmConflictError(`Cannot regenerate a ${draft.status} draft`);
   }
-  const previousBody = (draft.editedBodyText ?? draft.aiBodyText ?? "").trim();
-  const effectiveFeedback =
-    feedback?.trim() ||
-    (!draft.sequenceStepRunId && !draft.replyForMessageId && previousBody
-      ? "Refine and improve this outreach draft while preserving its core project scope, factual context, and link."
-      : "");
-  const revision: DraftRevisionRequest | null = effectiveFeedback && previousBody
-    ? { previousDraft: { subject: draft.subject, bodyText: previousBody }, reviewerFeedback: effectiveFeedback }
-    : null;
+  const revision = buildRegenerateDraftRevision(draft, feedback);
   if (draft.sequenceStepRunId) return generateDraftForStep(draft.sequenceStepRunId, dependencies, revision, true);
-  // A step-less draft the AI wrote is a no-sequence fallback and can be redrafted;
-  // one a human typed (createManualDraft) has no prompt to regenerate from.
-  if (!draft.provider) throw new CrmConflictError("One-off manual drafts cannot be regenerated");
-  const regenerated = await generateFallbackDraft(draft.crmRecordId, dependencies, revision);
+  const regenerated = await generateFallbackDraft(
+    draft.crmRecordId,
+    dependencies,
+    revision,
+    { targetDraftId: draft.id, personRequested: true },
+  );
   if (!regenerated) throw new CrmConflictError("This record can no longer be drafted for");
   return regenerated;
 }
