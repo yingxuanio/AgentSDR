@@ -185,6 +185,7 @@ export const crmPersonContactPolicies = pgTable(
     source: text("source").$type<"human" | "integration" | "inbound_request">(),
     setAt: timestamp("set_at", { withTimezone: true }),
     clearedAt: timestamp("cleared_at", { withTimezone: true }),
+    reviewAfter: timestamp("review_after", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

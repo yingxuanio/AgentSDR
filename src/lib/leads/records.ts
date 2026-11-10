@@ -6,7 +6,7 @@ import { campaigns as linkedinCampaigns, leads as linkedinLeads } from "@/lib/li
 import { inferCompanyDomainFromEmail, normalizeCompanyDomain, normalizeEmail, normalizeLinkedinSlug } from "./identity";
 import { personProfile } from "./variables";
 import { crmProjectionForPeople } from "@/lib/crm/queries";
-import { crmClassifications, crmRecords } from "@/lib/crm/schema";
+import { crmClassifications, crmPersonContactPolicies, crmRecords } from "@/lib/crm/schema";
 import { currentOrganizationId, inOrg } from "@/lib/tenancy/scope";
 
 export type LeadTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -343,13 +343,18 @@ export type CampaignMembership = {
   status: string;
 };
 
-type PersonListInput = {
+export type PersonListInput = {
   q?: string;
+  email?: string;
+  domain?: string;
+  company?: string;
   limit?: number;
   offset?: number;
   campaignChannel?: "email" | "linkedin" | "unassigned";
   hasEmail?: boolean;
   hasLinkedin?: boolean;
+  dnc?: boolean;
+  closed?: boolean;
   sort?: "name" | "title" | "email" | "company" | "updated" | "created";
   direction?: "asc" | "desc";
   crmCategory?: "customer" | "interested" | "not_interested" | "other";
@@ -391,9 +396,16 @@ export async function campaignMemberships(personIds: string[]) {
 export async function listPeoplePage(input: PersonListInput = {}) {
   const { limit, offset } = listBounds(input);
   const term = input.q?.trim() ? `%${input.q.trim()}%` : null;
+  const normalizedEmailFilter = input.email?.trim() ? normalizeEmail(input.email.trim()) : null;
+  const normalizedDomainFilter = input.domain?.trim() ? normalizeCompanyDomain(input.domain.trim()) : null;
+  const trimmedCompanyFilter = input.company?.trim() ? input.company.trim() : null;
+
   const conditions = [
     inOrg(people),
     term ? or(ilike(people.email, term), ilike(people.linkedinUrl, term), ilike(people.fullName, term), ilike(people.title, term), ilike(companies.name, term), ilike(companies.domain, term), sql`${people.raw}::text ilike ${term}`, sql`${people.custom}::text ilike ${term}`) : undefined,
+    normalizedEmailFilter ? sql`lower(${people.email}) = ${normalizedEmailFilter}` : undefined,
+    normalizedDomainFilter ? sql`lower(${companies.domain}) = ${normalizedDomainFilter}` : undefined,
+    trimmedCompanyFilter ? or(ilike(companies.name, trimmedCompanyFilter), ilike(companies.name, `%${trimmedCompanyFilter}%`)) : undefined,
     input.hasEmail === true ? sql`${people.email} is not null` : undefined,
     input.hasLinkedin === true ? sql`${people.linkedinUrl} is not null` : undefined,
     input.campaignChannel === "email" ? exists(db.select({ id: outreachLeads.id }).from(outreachLeads).where(eq(outreachLeads.personId, people.id))) : undefined,
@@ -411,6 +423,16 @@ export async function listPeoplePage(input: PersonListInput = {}) {
       db.select({ id: crmClassifications.id }).from(crmClassifications)
         .innerJoin(crmRecords, eq(crmRecords.id, crmClassifications.crmRecordId))
         .where(and(eq(crmRecords.personId, people.id), sql`${crmClassifications.acknowledgedAt} is null`)),
+    ) : undefined,
+    input.dnc !== undefined ? (
+      input.dnc
+        ? exists(db.select({ personId: crmPersonContactPolicies.personId }).from(crmPersonContactPolicies).where(and(eq(crmPersonContactPolicies.personId, people.id), eq(crmPersonContactPolicies.doNotContact, true))))
+        : sql`not exists (select 1 from crm_person_contact_policies where person_id = ${people.id} and do_not_contact is true)`
+    ) : undefined,
+    input.closed !== undefined ? (
+      input.closed
+        ? exists(db.select({ id: crmRecords.id }).from(crmRecords).where(and(eq(crmRecords.personId, people.id), eq(crmRecords.workflowState, "closed"))))
+        : sql`not exists (select 1 from crm_records where person_id = ${people.id} and workflow_state = 'closed')`
     ) : undefined,
   ].filter(Boolean);
   const where = conditions.length ? and(...conditions) : undefined;
@@ -438,18 +460,45 @@ export async function listPeoplePage(input: PersonListInput = {}) {
       .leftJoin(companies, and(eq(people.companyId, companies.id), inOrg(companies)))
       .where(where),
   ]);
-  const memberships = await campaignMemberships(rows.map((row) => row.person.id));
-  const crm = await crmProjectionForPeople(rows.map((row) => row.person.id));
+  const personIds = rows.map((row) => row.person.id);
+  const [memberships, crm, policies] = await Promise.all([
+    campaignMemberships(personIds),
+    crmProjectionForPeople(personIds),
+    personIds.length
+      ? db.select().from(crmPersonContactPolicies).where(inArray(crmPersonContactPolicies.personId, personIds))
+      : [],
+  ]);
+  const policyByPerson = new Map(policies.map((p) => [p.personId, p]));
+
   return {
     total,
     rows: rows.map(({ person, company }) => {
-    const profile = personProfile(person, company);
-    return {
-      person: { ...person, fullName: profile.name, firstName: profile.firstName, lastName: profile.lastName, title: profile.headline },
-      company,
-      campaigns: memberships.get(person.id) ?? [],
-      crm: crm.get(person.id) ?? null,
-    };
+      const profile = personProfile(person, company);
+      const crmEntry = crm.get(person.id) ?? null;
+      const personPolicy = policyByPerson.get(person.id) ?? null;
+      const dnc = Boolean(personPolicy?.doNotContact);
+      const closed = crmEntry ? crmEntry.workflowState === "closed" : false;
+      const contactPolicy = personPolicy ? {
+        doNotContact: personPolicy.doNotContact,
+        reason: personPolicy.reason,
+        source: personPolicy.source,
+        reviewAfter: personPolicy.reviewAfter,
+        setAt: personPolicy.setAt,
+        clearedAt: personPolicy.clearedAt,
+      } : null;
+
+      return {
+        person: { ...person, fullName: profile.name, firstName: profile.firstName, lastName: profile.lastName, title: profile.headline },
+        company,
+        campaigns: memberships.get(person.id) ?? [],
+        crm: crmEntry,
+        contactPolicy,
+        dnc,
+        closed,
+        lastOutboundAt: crmEntry?.lastOutboundAt ?? null,
+        lastInboundAt: crmEntry?.lastInboundAt ?? null,
+        lastInteractionAt: crmEntry?.lastInteractionAt ?? null,
+      };
     }),
   };
 }

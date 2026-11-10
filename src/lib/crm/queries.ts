@@ -640,6 +640,8 @@ export type CrmPeopleProjection = {
   categoryKey: string | null;
   subcategory: string | null;
   workflowState: string;
+  closed: boolean;
+  closedReason: string | null;
   activeChannel: string | null;
   activeSequence: string | null;
   currentStep: string | null;
@@ -648,13 +650,26 @@ export type CrmPeopleProjection = {
   lastInteractionAt: Date | null;
   nextActionAt: Date | null;
   unacknowledgedAiChange: boolean;
+  dnc: boolean;
+  contactPolicy: {
+    doNotContact: boolean;
+    reason: string | null;
+    source: string | null;
+    reviewAfter: Date | null;
+    setAt: Date | null;
+    clearedAt: Date | null;
+  } | null;
 };
 
 export async function crmProjectionForPeople(personIds: string[]): Promise<Map<string, CrmPeopleProjection>> {
   if (!personIds.length) return new Map<string, CrmPeopleProjection>();
-  const records = await db.select({ record: crmRecords, subcategory: crmSubcategories })
-    .from(crmRecords).leftJoin(crmSubcategories, eq(crmSubcategories.id, crmRecords.subcategoryId))
-    .where(and(inOrg(crmRecords), inArray(crmRecords.personId, personIds)));
+  const [records, policies] = await Promise.all([
+    db.select({ record: crmRecords, subcategory: crmSubcategories })
+      .from(crmRecords).leftJoin(crmSubcategories, eq(crmSubcategories.id, crmRecords.subcategoryId))
+      .where(and(inOrg(crmRecords), inArray(crmRecords.personId, personIds))),
+    db.select().from(crmPersonContactPolicies).where(inArray(crmPersonContactPolicies.personId, personIds)),
+  ]);
+  const policyByPerson = new Map(policies.map((p) => [p.personId, p]));
   const recordIds = records.map((row) => row.record.id);
   const [runs, classifications] = recordIds.length ? await Promise.all([
     db.select({ run: crmSequenceRuns, sequence: crmSequences, step: crmSequenceSteps })
@@ -669,11 +684,14 @@ export async function crmProjectionForPeople(personIds: string[]): Promise<Map<s
   return new Map<string, CrmPeopleProjection>(records.map(({ record, subcategory }) => {
     const run = runByRecord.get(record.id);
     const classification = classificationByRecord.get(record.id);
+    const policy = policyByPerson.get(record.personId);
     return [record.personId, {
       recordId: record.id,
       categoryKey: record.categoryKey,
       subcategory: subcategory?.name ?? null,
       workflowState: record.workflowState,
+      closed: record.workflowState === "closed",
+      closedReason: record.closedReason ?? null,
       activeChannel: record.activeChannel,
       activeSequence: run?.sequence.name ?? null,
       currentStep: run?.step?.name ?? null,
@@ -682,6 +700,15 @@ export async function crmProjectionForPeople(personIds: string[]): Promise<Map<s
       lastInteractionAt: record.lastInteractionAt,
       nextActionAt: record.nextActionAt,
       unacknowledgedAiChange: Boolean(classification && !classification.acknowledgedAt),
+      dnc: Boolean(policy?.doNotContact),
+      contactPolicy: policy ? {
+        doNotContact: policy.doNotContact,
+        reason: policy.reason,
+        source: policy.source,
+        reviewAfter: policy.reviewAfter,
+        setAt: policy.setAt,
+        clearedAt: policy.clearedAt,
+      } : null,
     }];
   }));
 }

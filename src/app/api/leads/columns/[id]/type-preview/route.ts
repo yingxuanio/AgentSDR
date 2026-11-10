@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth/context";
 import { previewTypeChange } from "@/lib/leads/columns";
 import { PG_TYPE_FOR_COLUMN_TYPE, type LeadColumnType } from "@/lib/leads/types";
-import { columnErrorResponse } from "../../route";
+import { columnErrorResponse } from "../../errors";
 
 /**
  * GET /api/leads/columns/[id]/type-preview?type=number

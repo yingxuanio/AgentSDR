@@ -85,6 +85,7 @@ export type SetPersonDoNotContactInput = ContactPolicyActor & {
   personId: string;
   reason: string;
   source: "human" | "integration" | "inbound_request";
+  reviewAfter?: Date | string | null;
 };
 
 export async function setPersonDoNotContactInTransaction(
@@ -95,9 +96,28 @@ export async function setPersonDoNotContactInTransaction(
   await assertPersonInOrg(tx, input.personId);
   await lockPersonContactPolicyScope(tx, input.personId);
   const previous = await getPersonContactPolicy(tx, input.personId);
-  if (previous?.doNotContact) return previous;
-
   const now = new Date();
+  const reviewAfter = input.reviewAfter !== undefined
+    ? (input.reviewAfter ? new Date(input.reviewAfter) : null)
+    : (previous?.reviewAfter ?? null);
+
+  if (previous?.doNotContact) {
+    const isSameReason = previous.reason === reason;
+    const isSameReview = (previous.reviewAfter?.getTime() ?? null) === (reviewAfter?.getTime() ?? null);
+    if (isSameReason && isSameReview) return previous;
+
+    const [updated] = await tx
+      .update(crmPersonContactPolicies)
+      .set({
+        reason,
+        reviewAfter,
+        updatedAt: now,
+      })
+      .where(eq(crmPersonContactPolicies.personId, input.personId))
+      .returning();
+    return updated ?? previous;
+  }
+
   const [policy] = await tx
     .insert(crmPersonContactPolicies)
     .values({
@@ -107,6 +127,7 @@ export async function setPersonDoNotContactInTransaction(
       source: input.source,
       setAt: now,
       clearedAt: null,
+      reviewAfter,
       updatedAt: now,
     })
     .onConflictDoUpdate({
@@ -117,6 +138,7 @@ export async function setPersonDoNotContactInTransaction(
         source: input.source,
         setAt: now,
         clearedAt: null,
+        reviewAfter,
         updatedAt: now,
       },
     })
@@ -185,7 +207,7 @@ export async function setPersonDoNotContactInTransaction(
       setAt: previous.setAt,
       clearedAt: previous.clearedAt,
     } : null,
-    toData: { doNotContact: true, reason, source: input.source, setAt: now },
+    toData: { doNotContact: true, reason, source: input.source, setAt: now, reviewAfter },
   });
   return policy;
 }
@@ -222,6 +244,7 @@ export async function clearPersonDoNotContactInTransaction(
       reason,
       source: input.source,
       clearedAt: now,
+      reviewAfter: null,
       updatedAt: now,
     })
     .where(eq(crmPersonContactPolicies.personId, input.personId))

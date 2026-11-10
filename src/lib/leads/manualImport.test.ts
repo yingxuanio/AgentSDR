@@ -9,6 +9,7 @@ describe("manual People import", () => {
       linkedinUrl: "https://www.linkedin.com/in/Jane-Doe/",
       fullName: " Jane Doe ",
     }), {
+      idempotencyKey: null,
       email: "jane@example.com",
       linkedinUrl: "jane-doe",
       firstName: null,
@@ -19,7 +20,37 @@ describe("manual People import", () => {
       companyDomain: null,
       notes: null,
       phone: null,
+      workflowState: undefined,
+      categoryKey: undefined,
+      createCrmRecord: true,
+      dnc: false,
+      dncReason: "Set during ingestion",
+      reviewAfter: null,
     });
+  });
+
+  test("validates and accepts idempotency keys and DNC settings", () => {
+    const reviewDate = new Date("2026-12-01T00:00:00Z");
+    const normalized = normalizeManualPersonInput({
+      email: "jane@example.com",
+      idempotencyKey: "import-lead-key-12345",
+      dnc: true,
+      dncReason: "Client request",
+      reviewAfter: reviewDate,
+      workflowState: "waiting",
+    });
+    assert.equal(normalized.idempotencyKey, "import-lead-key-12345");
+    assert.equal(normalized.dnc, true);
+    assert.equal(normalized.dncReason, "Client request");
+    assert.equal(normalized.reviewAfter?.toISOString(), reviewDate.toISOString());
+    assert.equal(normalized.workflowState, "waiting");
+  });
+
+  test("rejects invalid idempotency key format", () => {
+    assert.throws(() => normalizeManualPersonInput({
+      email: "jane@example.com",
+      idempotencyKey: "short",
+    }), /Invalid idempotency key format/);
   });
 
   test("normalizes a valid phone number and drops an invalid one without failing the row", () => {

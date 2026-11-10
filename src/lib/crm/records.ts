@@ -183,6 +183,51 @@ async function upsertCrmRecord(
   return { record: existing, created: false };
 }
 
+export async function ensurePersonCrmRecord(
+  tx: CrmTransaction,
+  input: {
+    personId: string;
+    pipelineId?: string;
+    workflowState?: CrmWorkflowState;
+    categoryKey?: CrmCategoryKey;
+    actorType?: CrmEventActor;
+  },
+): Promise<{ record: CrmRecord; created: boolean }> {
+  const result = await upsertCrmRecord(tx, input.personId, input.pipelineId);
+  if (result.created) {
+    await appendCrmEvent(tx, {
+      personId: result.record.personId,
+      crmRecordId: result.record.id,
+      pipelineId: result.record.pipelineId,
+      eventType: "record.created",
+      actorType: input.actorType ?? "integration",
+      actorRef: null,
+      toData: { cause: "lead_ingestion" },
+      contextVersion: result.record.contextVersion,
+    });
+  }
+  if (input.workflowState || input.categoryKey) {
+    const updates: Partial<typeof crmRecords.$inferInsert> = {};
+    if (input.workflowState && input.workflowState !== result.record.workflowState) {
+      updates.workflowState = input.workflowState;
+    }
+    if (input.categoryKey && input.categoryKey !== result.record.categoryKey) {
+      updates.categoryKey = input.categoryKey;
+      updates.categorySource = input.actorType === "human" ? "human" : "integration";
+    }
+    if (Object.keys(updates).length > 0) {
+      updates.updatedAt = new Date();
+      const [updated] = await tx
+        .update(crmRecords)
+        .set(updates)
+        .where(eq(crmRecords.id, result.record.id))
+        .returning();
+      if (updated) return { record: updated, created: result.created };
+    }
+  }
+  return result;
+}
+
 async function validateSubcategory(
   tx: CrmTransaction,
   input: {
