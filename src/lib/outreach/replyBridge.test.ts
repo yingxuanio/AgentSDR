@@ -447,3 +447,69 @@ test("a non-recipient on an unknown thread stays Master-Inbox-only", async () =>
   assert.deepEqual(result, { leadId: "inbox-contact-2", skipped: false });
   assert.equal(contactArg, undefined);
 });
+
+test("skips message when explicitly addressed to another configured org mailbox", async () => {
+  let stored = false;
+  const log = createStepLogger();
+  const result = await ingestGmailReply("ivan@linktion.cn", {
+    gmailMessageId: "imap-13875",
+    threadId: null,
+    fromEmail: "client@example.com",
+    fromName: "Client",
+    toEmail: "ivan@yingxuan.io",
+    to: [{ email: "ivan@yingxuan.io", name: null }],
+    cc: [],
+    replyTo: [],
+    ccEmails: [],
+    subject: "Inquiry",
+    bodyText: "Hello Yingxuan team",
+    messageId: "<test-msg-1@example.com>",
+    inReplyTo: null,
+    internalDate: new Date("2026-11-10T00:00:00.000Z"),
+  }, log, {
+    isOtherOrgMailbox: async (email) => email === "ivan@yingxuan.io",
+    storeInMasterInbox: async () => {
+      stored = true;
+      return { leadId: "lead-1", created: true };
+    },
+  });
+
+  assert.deepEqual(result, { leadId: null, skipped: true });
+  assert.equal(stored, false);
+  assert.match(log.steps.map((s) => s.message).join("\n"), /belongs to another configured mailbox/);
+});
+
+test("skips duplicate CRM processing if message was already stored in Master Inbox", async () => {
+  let crmIngested = false;
+  const log = createStepLogger();
+  const result = await ingestGmailReply("ivan@yingxuan.io", {
+    gmailMessageId: "imap-13875",
+    threadId: null,
+    fromEmail: "client@example.com",
+    fromName: "Client",
+    toEmail: "ivan@yingxuan.io",
+    to: [{ email: "ivan@yingxuan.io", name: null }],
+    cc: [],
+    replyTo: [],
+    ccEmails: [],
+    subject: "Inquiry",
+    bodyText: "Hello",
+    messageId: "<test-msg-1@example.com>",
+    inReplyTo: null,
+    internalDate: new Date("2026-11-10T00:00:00.000Z"),
+  }, log, {
+    isKnownOutreachRecipient: async () => true,
+    storeInMasterInbox: async () => {
+      // Simulate that the message was already stored by a previous run or another alias
+      return { leadId: "lead-1", created: false };
+    },
+    ingestCrm: async () => {
+      crmIngested = true;
+      throw new Error("Should not be called for duplicate");
+    },
+  });
+
+  assert.deepEqual(result, { leadId: "lead-1", skipped: true });
+  assert.equal(crmIngested, false);
+  assert.match(log.steps.map((s) => s.message).join("\n"), /skipping duplicate CRM work/);
+});

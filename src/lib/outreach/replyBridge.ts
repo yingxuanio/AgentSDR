@@ -1,10 +1,10 @@
 /** Stores Gmail mail in Master Inbox and routes known contacts into CRM. */
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { inboxContacts, inboxMessages } from "@/lib/inbox/schema";
 import { type StepLogger } from "@/lib/debugLog";
 import { htmlToPlainText, looksLikeHtml } from "@/lib/email/htmlToText";
-import { outreachLeads } from "./schema";
+import { mailboxes, outreachLeads } from "./schema";
 import { suppressEmailOutreach } from "./suppression";
 import type { InboundMessage } from "./gmail";
 import { upsertPerson, withLeadTransaction } from "@/lib/leads/records";
@@ -230,6 +230,23 @@ async function storeGmailMessageInMasterInbox(
       .returning({ id: inboxContacts.id });
     if (!lead) throw new Error("Master Inbox contact upsert did not return a row");
 
+    if (msg.messageId?.trim()) {
+      const [existing] = await tx
+        .select({ id: inboxMessages.id, contactId: inboxMessages.contactId })
+        .from(inboxMessages)
+        .innerJoin(inboxContacts, eq(inboxContacts.id, inboxMessages.contactId))
+        .where(
+          and(
+            inOrg(inboxContacts),
+            sql`${inboxMessages.raw}->>'messageId' = ${msg.messageId.trim()}`,
+          ),
+        )
+        .limit(1);
+      if (existing) {
+        return { leadId: existing.contactId, created: false };
+      }
+    }
+
     const [message] = await tx
       .insert(inboxMessages)
       .values({
@@ -239,7 +256,7 @@ async function storeGmailMessageInMasterInbox(
         subject: msg.subject,
         bodyText,
         fromEmail: msg.fromEmail,
-        toEmail: mailboxAddress,
+        toEmail: msg.toEmail || mailboxAddress,
         sentAt: repliedAt,
         raw: msg as unknown as object,
       })
@@ -288,6 +305,10 @@ async function attachToThreadConversation(
   if (!leadEmail) throw new Error("CRM conversation has no lead email to file the reply under");
   const inbox = await storeInMasterInbox(mailboxAddress, msg, bodyText, durableMessageKey, { email: leadEmail });
   log.info(inbox.created ? "Message stored in Master Inbox" : "Message already exists in Master Inbox");
+  if (!inbox.created) {
+    log.info(`Message ${msg.messageId ?? msg.gmailMessageId} is already stored in Master Inbox — skipping thread conversation attach`);
+    return { leadId: conversation.personId, skipped: true as const };
+  }
   if (!bodyText?.trim()) throw new Error("CRM cannot ingest an empty Gmail reply");
   const result = await ingest({
     personId: conversation.personId,
@@ -319,6 +340,7 @@ export async function ingestGmailReply(
   log: StepLogger,
   options: {
     isKnownOutreachRecipient?: (email: string) => Promise<boolean>;
+    isOtherOrgMailbox?: (email: string) => Promise<boolean>;
     storeInMasterInbox?: typeof storeGmailMessageInMasterInbox;
     suppress?: typeof suppressEmailOutreach;
     findThreadConversation?: (mailboxAddress: string, threadId: string) => Promise<ThreadConversation | null>;
@@ -338,6 +360,26 @@ export async function ingestGmailReply(
   if (msg.fromEmail === mailboxAddress.toLowerCase()) {
     log.info("Message is from this mailbox itself — skipping");
     return { leadId: null, skipped: true as const };
+  }
+
+  // If the message is explicitly addressed to another active mailbox in the same
+  // organization (e.g. multi-domain aliases or forwards on the same IMAP account),
+  // skip it here so the targeted mailbox handles it natively without duplicating.
+  const targetEmail = (msg.toEmail ?? "").trim().toLowerCase();
+  const mailboxLower = mailboxAddress.trim().toLowerCase();
+  if (targetEmail && targetEmail !== mailboxLower) {
+    const isOtherMailbox = options.isOtherOrgMailbox ?? (async (email: string) => {
+      const [other] = await db
+        .select({ id: mailboxes.id })
+        .from(mailboxes)
+        .where(and(inOrg(mailboxes), eq(mailboxes.emailAddress, email), eq(mailboxes.status, "connected")))
+        .limit(1);
+      return Boolean(other);
+    });
+    if (await isOtherMailbox(targetEmail)) {
+      log.info(`Message recipient ${targetEmail} belongs to another configured mailbox in this org — skipping sync under ${mailboxAddress}`);
+      return { leadId: null, skipped: true as const };
+    }
   }
 
   // Gmail's INBOX also receives Smartlead warm-up-pool exchanges. Ignore only
@@ -397,11 +439,6 @@ export async function ingestGmailReply(
   const { first, last } = splitName(msg.fromName);
   const repliedAt = msg.internalDate ?? new Date();
 
-  const [resolvedPerson] = await db
-    .select({ id: people.id })
-    .from(people)
-    .where(and(inOrg(people), eq(people.email, email)))
-    .limit(1);
   const inbox = await (options.storeInMasterInbox ?? storeGmailMessageInMasterInbox)(
     mailboxAddress,
     msg as InboundMessage & { fromEmail: string },
@@ -409,6 +446,16 @@ export async function ingestGmailReply(
     durableMessageKey,
   );
   log.info(inbox.created ? "Message stored in Master Inbox" : "Message already exists in Master Inbox");
+  if (!inbox.created) {
+    log.info(`Message ${msg.messageId ?? msg.gmailMessageId} is already stored in Master Inbox — skipping duplicate CRM work`);
+    return { leadId: inbox.leadId, skipped: true as const };
+  }
+
+  const [resolvedPerson] = await db
+    .select({ id: people.id })
+    .from(people)
+    .where(and(inOrg(people), eq(people.email, email)))
+    .limit(1);
   if (!resolvedPerson) {
     await quarantineCrmIdentity({
       channel: "email",
