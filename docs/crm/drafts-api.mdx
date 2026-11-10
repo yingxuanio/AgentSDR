@@ -1,0 +1,100 @@
+---
+title: "CRM Drafts API"
+description: "HTTP contract for generating, reading, editing, and safely rebinding sender mailboxes on CRM drafts without sending mail."
+icon: "code"
+---
+
+All `/api/crm/drafts` endpoints require organization authentication via session cookie, `Authorization: Bearer <API_KEY>`, or `x-api-key: <API_KEY>`. Draft creation, editing, regeneration, and sender rebinding never send or queue outbound email.
+
+## Read a single draft
+
+```http
+GET /api/crm/drafts/{id}
+```
+
+Returns the draft with resolved `fromEmail`, `toEmail`, `bodyText`, `bodyHtml`, `status`, `revision`, and `autoSendAt`, plus `person` and `company` summaries.
+
+## List drafts
+
+```http
+GET /api/crm/drafts?status=awaiting_review
+```
+
+Supported `status` values include `awaiting_review` (default), `failed`, `sent`, `sending`, `discarded`, `stale`, `delivery_uncertain`, or `all`.
+
+## Generate an initial first-touch draft
+
+```http
+POST /api/crm/drafts
+Content-Type: application/json
+
+{
+  "action": "generate",
+  "recordId": "<UUID>",
+  "feedback": "Optional brief"
+}
+```
+
+- Accepts `recordId`, `personId`, `email` / `toEmail`, or `companyCode` / `code` to identify an existing lead.
+- Optional `fromEmail`: if omitted on a first-touch record with no prior thread, the sender mailbox and brand context are resolved automatically from `crm_settings.draft_instructions` (`comm_brand_routing`), lead/company metadata (`companyCode` / `x_code`, `country` / `x_region`, entity name, and script context), and the organization's connected `outreach_mailboxes`.
+- Idempotent when an `awaiting_review` draft already exists on the record: returns HTTP `200` with `created: false` and does not overwrite the existing draft. New drafts return HTTP `201` with `created: true`.
+
+## Safely rebind `fromEmail` on an unsent `awaiting_review` draft
+
+```http
+PATCH /api/crm/drafts/{id}
+Content-Type: application/json
+
+{
+  "fromEmail": "ivan@linktion.cn",
+  "revision": 2
+}
+```
+
+### Request fields (`PATCH` / `PUT` / `POST` `/api/crm/drafts/{id}`)
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `fromEmail` | `string` | Required for sender-only rebind; optional when editing `bodyText` | Connected organization mailbox address to bind as the draft's outbound sender (`crm_conversations.account_ref`). |
+| `revision` | `integer` | Optional | Expected current `draft.revision` for optimistic concurrency control. |
+| `subject` | `string \| null` | Optional (requires `bodyText`) | Updated email subject line when editing content. |
+| `bodyText` / `body` | `string` | Optional when `fromEmail` is set; required for content edits | Replacement plain-text draft body. Omitted during a sender-only rebind so existing `subject`, `aiBodyText`, `aiBodyHtml`, `editedBodyText`, and `editedBodyHtml` are preserved verbatim. |
+| `bodyHtml` | `string \| null` | Optional (requires `bodyText`) | Optional HTML body override when editing content. |
+
+Unknown fields are rejected with HTTP `400` (`code: "VALIDATION_ERROR"`).
+
+### Response shape
+
+```json
+{
+  "changed": true,
+  "previousFromEmail": "ivan@yingxuan.io",
+  "draft": {
+    "id": "20a3358b-1d69-4372-a018-462116d8304c",
+    "crmRecordId": "62b1e014-102f-4c55-b368-59dc999c87a6",
+    "conversationId": "<target-conversation-uuid>",
+    "status": "awaiting_review",
+    "revision": 3,
+    "autoSendAt": null,
+    "fromEmail": "ivan@linktion.cn",
+    "toEmail": "info@taisei-musen.com.hk",
+    "subject": "...",
+    "bodyText": "...",
+    "bodyHtml": "..."
+  }
+}
+```
+
+### Status, queue-lock, and idempotency guarantees
+
+- **No send / no queue**: Rebinding `fromEmail` never sends mail, never creates a `crm_send_attempts` row, and keeps `status = "awaiting_review"` and `autoSendAt = null`.
+- **Body & history preserved**: On sender-only `{ "fromEmail": "..." }`, `subject`, `aiBodyText`, `aiBodyHtml`, `editedBodyText`, and `editedBodyHtml` remain untouched, and no duplicate draft or company record is created.
+- **Idempotent repeat**: Calling `PATCH /api/crm/drafts/{id}` again with the already-bound `fromEmail` returns HTTP `200` with `"changed": false`, leaving `revision` and `updatedAt` unchanged.
+- **Locked when sent or queued (HTTP `409 CONFLICT`)**:
+  - Rejects `status = "sent"`, `"sending"`, `"delivery_uncertain"`, `"discarded"`, `"stale"`, `"generating"`, or `"failed"`.
+  - Rejects queued auto-send drafts (`status = "awaiting_review"` with `autoSendAt !== null`).
+  - Rejects drafts that already have a `crm_send_attempts` row in `prepared`, `sending`, `sent`, `delivery_uncertain`, or `reconciled`.
+  - Rejects stale `revision` mismatches (`Draft revision is stale`) or drafts bound to an existing inbound reply message / sequence step on another conversation.
+- **Mailbox validation (HTTP `400 VALIDATION_ERROR`)**: Rejects malformed email addresses or addresses that do not match a `connected` mailbox in `outreach_mailboxes` when the organization has connected mailboxes.
+
+Batch / selector lookup is also supported via `PATCH /api/crm/drafts` with `{ "id" | "draftId" | "companyCode" | "toEmail", "fromEmail": "...", "revision"?: ... }` under the same status and queue-lock rules.

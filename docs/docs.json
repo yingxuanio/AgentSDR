@@ -176,6 +176,7 @@
             "group": "Reference",
             "pages": [
               "database",
+              "crm/drafts-api",
               "multi-tenancy/conventions"
             ]
           }

@@ -8,6 +8,7 @@ import { crmOperationErrorResponse, requireInteger } from "@/lib/crm/api";
 import { parseOptionalText, parseRequiredText, readCrmJson } from "@/lib/crm/categories";
 import {
   createOrGenerateInitialDraft,
+  rebindDraftSender,
   regenerateDraft,
   resolveCompanyCode,
   selectRegenerateTargetDrafts,
@@ -20,8 +21,10 @@ import { runInOrganization } from "@/lib/tenancy/scope";
 type DraftListItem = {
   id: string;
   crmRecordId: string;
+  conversationId: string;
   revision: number;
   status: string;
+  autoSendAt: string | null;
   channel: string;
   subject: string | null;
   bodyText: string;
@@ -74,16 +77,17 @@ async function loadOrgDrafts(
     return {
       id: row.draft.id,
       crmRecordId: row.draft.crmRecordId,
+      conversationId: row.draft.conversationId,
       revision: row.draft.revision,
       status: row.draft.status,
+      autoSendAt: row.draft.autoSendAt ? row.draft.autoSendAt.toISOString() : null,
       channel: row.draft.channel,
       subject: row.draft.subject,
       bodyText: row.draft.editedBodyText ?? row.draft.aiBodyText ?? "",
       bodyHtml: row.draft.editedBodyHtml ?? row.draft.aiBodyHtml ?? null,
       fromEmail:
-        typeof reqObj.from === "string"
-          ? reqObj.from
-          : row.conversation?.accountRef ?? null,
+        row.conversation?.accountRef ??
+        (typeof reqObj.from === "string" ? reqObj.from : null),
       toEmail:
         typeof reqObj.to === "string"
           ? reqObj.to
@@ -159,6 +163,21 @@ async function handleBatchOrSingleMutate(request: NextRequest) {
         ctx.userName,
       );
 
+      const [[conversation], [recordPerson]] = await Promise.all([
+        db
+          .select({ accountRef: crmConversations.accountRef })
+          .from(crmConversations)
+          .where(eq(crmConversations.id, result.draft.conversationId))
+          .limit(1),
+        db
+          .select({ email: people.email })
+          .from(crmRecords)
+          .innerJoin(people, eq(people.id, crmRecords.personId))
+          .where(eq(crmRecords.id, result.draft.crmRecordId))
+          .limit(1),
+      ]);
+      const reqObj = (result.draft.request ?? {}) as Record<string, unknown>;
+
       return Response.json(
         {
           created: result.created,
@@ -168,7 +187,15 @@ async function handleBatchOrSingleMutate(request: NextRequest) {
             conversationId: result.draft.conversationId,
             revision: result.draft.revision,
             status: result.draft.status,
+            autoSendAt: result.draft.autoSendAt ? result.draft.autoSendAt.toISOString() : null,
             channel: result.draft.channel,
+            fromEmail:
+              conversation?.accountRef ??
+              (typeof reqObj.from === "string" ? reqObj.from : null),
+            toEmail:
+              typeof reqObj.to === "string"
+                ? reqObj.to
+                : recordPerson?.email ?? null,
             subject: result.draft.subject,
             bodyText: result.draft.editedBodyText ?? result.draft.aiBodyText,
             bodyHtml: result.draft.editedBodyHtml ?? result.draft.aiBodyHtml,
@@ -211,8 +238,10 @@ async function handleBatchOrSingleMutate(request: NextRequest) {
       return Response.json({ updatedCount: results.filter((r) => r.status === "ok").length, results });
     }
 
-    // Mode 2: Direct replacement of one or multiple drafts (`{ drafts: [...] }` or single `{ id | companyCode | toEmail, subject?, bodyText }`)
-    const allDrafts = await loadOrgDrafts(["awaiting_review", "failed"]);
+    // Mode 2: Direct update / sender rebind of one or multiple drafts
+    // (`{ drafts: [...] }` or single `{ id | draftId | companyCode | toEmail, fromEmail?, subject?, bodyText?, bodyHtml?, revision? }`)
+    const editableDrafts = await loadOrgDrafts(["awaiting_review", "failed"]);
+    let fullOrgDrafts: DraftListItem[] | null = null;
     const items = Array.isArray(body.drafts) ? (body.drafts as Record<string, unknown>[]) : [body];
     const updatedDrafts = [];
 
@@ -222,34 +251,92 @@ async function handleBatchOrSingleMutate(request: NextRequest) {
       const targetCode = typeof item.companyCode === "string" ? item.companyCode.trim().toUpperCase() : "";
       const targetEmail = typeof item.toEmail === "string" ? item.toEmail.trim().toLowerCase() : "";
 
-      const candidates = allDrafts.filter((d) => {
-        if (targetId && d.id === targetId) return true;
-        if (targetCode && d.company?.code?.toUpperCase() === targetCode) return true;
-        if (targetEmail && d.toEmail?.toLowerCase() === targetEmail) return true;
-        return false;
-      });
-      const matched = candidates.find((d) => d.status === "awaiting_review") ?? candidates[0];
+      const matchItem = (list: readonly DraftListItem[]) => {
+        const candidates = list.filter((d) => {
+          if (targetId && d.id === targetId) return true;
+          if (targetCode && d.company?.code?.toUpperCase() === targetCode) return true;
+          if (targetEmail && d.toEmail?.toLowerCase() === targetEmail) return true;
+          return false;
+        });
+        return candidates.find((d) => d.status === "awaiting_review") ?? candidates[0];
+      };
+
+      let matched = matchItem(editableDrafts);
+      if (!matched && (targetId || item.fromEmail !== undefined)) {
+        fullOrgDrafts ??= await loadOrgDrafts("all");
+        matched = matchItem(fullOrgDrafts);
+      }
 
       if (!matched) {
         return Response.json(
-          { error: `No awaiting_review draft matched ${targetId || targetCode || targetEmail || "item"}` },
+          { error: `No awaiting_review draft matched ${targetId || targetCode || targetEmail || "item"}`, code: "NOT_FOUND" },
           { status: 404 },
         );
       }
 
+      const revision =
+        item.revision !== undefined && item.revision !== null
+          ? requireInteger(item.revision, "revision")
+          : null;
+      const fromEmail =
+        item.fromEmail !== undefined && item.fromEmail !== null
+          ? parseRequiredText(item.fromEmail, "fromEmail", 320)
+          : null;
+      const rawBody = item.bodyText ?? item.body;
+
+      if (
+        fromEmail !== null &&
+        (rawBody === undefined || rawBody === null) &&
+        item.subject === undefined &&
+        item.bodyHtml === undefined
+      ) {
+        const rebound = await rebindDraftSender({
+          draftId: matched.id,
+          fromEmail,
+          revision,
+          actorRef: ctx.userName,
+        });
+        updatedDrafts.push({
+          id: rebound.draft.id,
+          changed: rebound.changed,
+          status: rebound.draft.status,
+          autoSendAt: rebound.draft.autoSendAt ? rebound.draft.autoSendAt.toISOString() : null,
+          companyCode: matched.company?.code ?? null,
+          companyName: matched.company?.name ?? null,
+          fromEmail: rebound.fromEmail,
+          previousFromEmail: rebound.previousFromEmail,
+          toEmail: rebound.toEmail ?? matched.toEmail,
+          revision: rebound.draft.revision,
+          subject: rebound.draft.subject,
+          bodyText: rebound.draft.editedBodyText ?? rebound.draft.aiBodyText,
+        });
+        continue;
+      }
+
       const updated = await updateDraft({
         draftId: matched.id,
-        revision: item.revision !== undefined && item.revision !== null ? requireInteger(item.revision, "revision") : null,
+        revision,
+        fromEmail,
         subject: parseOptionalText(item.subject, "subject", 998),
-        bodyText: parseRequiredText(item.bodyText ?? item.body, "bodyText", 100_000),
+        bodyText: parseRequiredText(rawBody, "bodyText", 100_000),
         bodyHtml: parseOptionalText(item.bodyHtml, "bodyHtml", 100_000),
         actorRef: ctx.userName,
       });
 
+      const [conv] = await db
+        .select({ accountRef: crmConversations.accountRef })
+        .from(crmConversations)
+        .where(eq(crmConversations.id, updated.conversationId))
+        .limit(1);
+
       updatedDrafts.push({
         id: updated.id,
+        changed: true,
+        status: updated.status,
+        autoSendAt: updated.autoSendAt ? updated.autoSendAt.toISOString() : null,
         companyCode: matched.company?.code ?? null,
         companyName: matched.company?.name ?? null,
+        fromEmail: conv?.accountRef ?? matched.fromEmail,
         toEmail: matched.toEmail,
         revision: updated.revision,
         subject: updated.subject,

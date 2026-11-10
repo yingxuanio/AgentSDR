@@ -231,7 +231,20 @@ export default function ApiKeysSettingsClient({
 
             <div className="flex items-center gap-1.5 pt-2 text-label-xs text-text-strong-950">
               <RiTerminalBoxLine className="size-4 text-text-sub-600" />
-              <span>3. Batch rewrite drafts with an AI instruction</span>
+              <span>3. Rebind sender mailbox (fromEmail) on an unsent awaiting_review draft without changing body or sending</span>
+            </div>
+            <pre className="overflow-x-auto rounded-lg bg-bg-weak-50 p-3 font-mono text-xs text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200">
+{`curl -sS -X PATCH https://sdr.linktion.cn/api/crm/drafts/<DRAFT_ID> \\
+  -H "Authorization: Bearer <API_KEY>" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "fromEmail": "ivan@linktion.cn"
+  }'`}
+            </pre>
+
+            <div className="flex items-center gap-1.5 pt-2 text-label-xs text-text-strong-950">
+              <RiTerminalBoxLine className="size-4 text-text-sub-600" />
+              <span>4. Batch rewrite drafts with an AI instruction</span>
             </div>
             <pre className="overflow-x-auto rounded-lg bg-bg-weak-50 p-3 font-mono text-xs text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200">
 {`curl -sS -X POST https://sdr.linktion.cn/api/crm/drafts \\

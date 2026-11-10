@@ -9,6 +9,8 @@ import { loadDraftNow, loadDraftSender } from "./draftSender";
 import { appendCrmEvent } from "./events";
 import { retrieveKnowledge } from "./knowledge";
 import { isPersonDoNotContact } from "./policies";
+import { CrmConfigurationValidationError } from "./categories";
+import { resolveOutboundEmailRouting, resolveRoutingCompanyCode } from "./brandRouting";
 import {
   CrmConflictError,
   CrmNotFoundError,
@@ -28,6 +30,7 @@ import {
   crmDraftKnowledgeCitations,
   crmDrafts,
   crmRecords,
+  crmSendAttempts,
   crmSequenceRuns,
   crmSequences,
   crmSequenceStepRuns,
@@ -253,6 +256,24 @@ async function loadDraftSubject(
     .where(eq(crmSettings.pipelineId, record.pipelineId))
     .limit(1);
 
+  const resolvedCompanyCode = resolveRoutingCompanyCode({
+    company: profile.company,
+    person: profile.person,
+  });
+  const personAttributes = scalarAttributes({
+    ...(profile.person.raw ?? {}),
+    ...(profile.person.custom ?? {}),
+  });
+  const companyAttributes = profile.company
+    ? scalarAttributes({
+        ...(profile.company.raw ?? {}),
+        ...(profile.company.custom ?? {}),
+        ...(resolvedCompanyCode
+          ? { x_code: resolvedCompanyCode, company_code: resolvedCompanyCode }
+          : {}),
+      })
+    : {};
+
   return {
     knowledge: retrieved.entries,
     person: {
@@ -263,14 +284,14 @@ async function loadDraftSubject(
       email: profile.person.email,
       linkedinUrl: profile.person.linkedinUrl,
       title: profile.person.title,
-      attributes: scalarAttributes(profile.person.raw),
+      attributes: personAttributes,
     },
     company: profile.company ? {
       id: profile.company.id,
       name: profile.company.name,
       domain: profile.company.domain,
       linkedinUrl: profile.company.linkedinUrl,
-      attributes: scalarAttributes(profile.company.raw),
+      attributes: companyAttributes,
     } : null,
     recentConversation: [
       ...messages.map((message) => ({
@@ -571,10 +592,41 @@ const FALLBACK_STEP_INSTRUCTIONS = [
 const OUTBOUND_FALLBACK_STEP_INSTRUCTIONS = [
   "This is an initial outbound outreach draft (no inbound reply yet).",
   "Write or refine a concise, high-trust outreach message tailored to the person and company profile, knowledge excerpts, and any reviewer feedback or previous draft.",
+  "Match the language, brand identity, sign-off, and verified reference links to the bound sender account and operator brand-routing instructions (for example, English as Linktion when sending from a Linktion mailbox, or Traditional Chinese as 英选 for TW leads when sending from a Yingxuan mailbox).",
   "Use only facts present in the person/company attributes, knowledge excerpts, or previous draft — never invent product details, pricing, availability, names, dates or commitments.",
 ].join(" ");
 
 const FALLBACK_DRAFT_STATUSES = ["generating", "awaiting_review", "failed"] as const;
+
+async function cleanupOrphanedConversation(
+  tx: CrmTransaction,
+  conversationId: string | null | undefined,
+): Promise<void> {
+  if (!conversationId) return;
+  const [[msgCount], [draftCount], [runCount]] = await Promise.all([
+    tx
+      .select({ total: count() })
+      .from(crmConversationMessages)
+      .where(eq(crmConversationMessages.conversationId, conversationId)),
+    tx
+      .select({ total: count() })
+      .from(crmDrafts)
+      .where(eq(crmDrafts.conversationId, conversationId)),
+    tx
+      .select({ total: count() })
+      .from(crmSequenceRuns)
+      .where(eq(crmSequenceRuns.conversationId, conversationId)),
+  ]);
+  if (
+    Number(msgCount?.total ?? 0) === 0 &&
+    Number(draftCount?.total ?? 0) === 0 &&
+    Number(runCount?.total ?? 0) === 0
+  ) {
+    await tx
+      .delete(crmConversations)
+      .where(and(inOrg(crmConversations), eq(crmConversations.id, conversationId)));
+  }
+}
 
 /**
  * Prepare a draft for a record that has no active sequence step.
@@ -587,6 +639,7 @@ async function loadFallbackDraftContext(
   tx: CrmTransaction,
   recordId: string,
   targetDraftId?: string,
+  targetConversationId?: string,
 ): Promise<PreparedDraft | null> {
   const record = await lockCrmRecord(tx, recordId);
   if (await isPersonDoNotContact(tx, record.personId)) return null;
@@ -629,6 +682,18 @@ async function loadFallbackDraftContext(
       .limit(1);
     conversationRow = found?.conversation;
   }
+  if (!conversationRow && targetConversationId) {
+    const [found] = await tx
+      .select()
+      .from(crmConversations)
+      .where(and(
+        inOrg(crmConversations),
+        eq(crmConversations.id, targetConversationId),
+        eq(crmConversations.crmRecordId, record.id),
+      ))
+      .limit(1);
+    conversationRow = found;
+  }
   if (!conversationRow && existing?.conversationId) {
     const [found] = await tx
       .select()
@@ -665,6 +730,7 @@ async function loadFallbackDraftContext(
   const now = new Date();
   let draft: CrmDraft | undefined;
   if (existing) {
+    const previousConversationId = existing.conversationId;
     [draft] = await tx.update(crmDrafts).set({
       conversationId: conversationRow.id,
       replyForMessageId: record.latestInboundMessageId,
@@ -675,6 +741,9 @@ async function loadFallbackDraftContext(
       revision: existing.revision + 1,
       updatedAt: now,
     }).where(eq(crmDrafts.id, existing.id)).returning();
+    if (previousConversationId && previousConversationId !== conversationRow.id) {
+      await cleanupOrphanedConversation(tx, previousConversationId);
+    }
   } else {
     [draft] = await tx.insert(crmDrafts).values({
       crmRecordId: record.id,
@@ -715,10 +784,10 @@ export async function generateFallbackDraft(
   recordId: string,
   dependencies: { complete?: DraftCompletion } = {},
   revision: DraftRevisionRequest | null = null,
-  options: { targetDraftId?: string; personRequested?: boolean } = {},
+  options: { targetDraftId?: string; targetConversationId?: string; personRequested?: boolean } = {},
 ): Promise<CrmDraft | null> {
   const prepared = await withCrmTransaction((tx) =>
-    loadFallbackDraftContext(tx, recordId, options.targetDraftId),
+    loadFallbackDraftContext(tx, recordId, options.targetDraftId, options.targetConversationId),
   );
   if (!prepared) return null;
   try {
@@ -885,10 +954,178 @@ export function selectRegenerateTargetDrafts<
   return [...byRecord.values()];
 }
 
+const BASIC_EMAIL_SYNTAX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+async function validateAndResolveFromEmail(
+  tx: CrmTransaction,
+  rawFromEmail: string,
+): Promise<{ accountRef: string; mailboxId: string | null }> {
+  const normalized = normalizeEmail(rawFromEmail);
+  if (!normalized || !BASIC_EMAIL_SYNTAX.test(normalized)) {
+    throw new CrmConfigurationValidationError("fromEmail must be a valid email address");
+  }
+
+  const connectedMailboxes = await tx
+    .select({
+      id: mailboxes.id,
+      emailAddress: mailboxes.emailAddress,
+      displayName: mailboxes.displayName,
+    })
+    .from(mailboxes)
+    .where(and(inOrg(mailboxes), eq(mailboxes.status, "connected")))
+    .orderBy(desc(mailboxes.createdAt), asc(mailboxes.emailAddress));
+
+  if (connectedMailboxes.length > 0) {
+    const matched = connectedMailboxes.find(
+      (m) => normalizeEmail(m.emailAddress) === normalized,
+    );
+    if (!matched) {
+      throw new CrmConfigurationValidationError(
+        `fromEmail ${rawFromEmail.trim()} is not a connected mailbox in this organization`,
+      );
+    }
+    return { accountRef: matched.emailAddress.trim(), mailboxId: matched.id };
+  }
+
+  return { accountRef: normalized, mailboxId: null };
+}
+
+async function assertDraftCanRebindSender(
+  tx: CrmTransaction,
+  draft: CrmDraft,
+): Promise<void> {
+  if (draft.status === "sent") {
+    throw new CrmConflictError("Cannot change fromEmail on a sent draft");
+  }
+  if (draft.status === "sending" || draft.status === "delivery_uncertain") {
+    throw new CrmConflictError(`Cannot change fromEmail on a ${draft.status} draft`);
+  }
+  if (draft.status !== "awaiting_review") {
+    throw new CrmConflictError(
+      `Only unsent awaiting_review drafts can change fromEmail (current status: ${draft.status})`,
+    );
+  }
+  if (draft.autoSendAt !== null) {
+    throw new CrmConflictError("Cannot change fromEmail on a queued auto-send draft");
+  }
+
+  const [existingAttempt] = await tx
+    .select({ id: crmSendAttempts.id, status: crmSendAttempts.status })
+    .from(crmSendAttempts)
+    .where(and(
+      eq(crmSendAttempts.draftId, draft.id),
+      inArray(crmSendAttempts.status, [
+        "prepared",
+        "sending",
+        "sent",
+        "delivery_uncertain",
+        "reconciled",
+      ]),
+    ))
+    .limit(1);
+  if (existingAttempt) {
+    throw new CrmConflictError(
+      "Cannot change fromEmail on a draft that has already been queued or sent",
+    );
+  }
+
+  if (draft.channel !== "email") {
+    throw new CrmConfigurationValidationError("fromEmail can only be set on email drafts");
+  }
+}
+
+async function syncSenderAcrossInboxAndOutreach(
+  tx: CrmTransaction,
+  record: { organizationId: string; personId: string },
+  person: { email: string | null; companyId: string | null } | undefined,
+  accountRef: string,
+  mailboxId: string | null,
+): Promise<void> {
+  const email = person?.email?.trim();
+  if (email) {
+    await tx.execute(sql`
+      UPDATE crm_leads
+      SET mailbox = ${accountRef},
+          updated_at = now()
+      WHERE organization_id = ${record.organizationId}::uuid
+        AND lower(email) = lower(${email})
+        AND NOT EXISTS (
+          SELECT 1 FROM crm_messages cm WHERE cm.lead_id = crm_leads.id
+        )
+    `);
+
+    await tx.execute(sql`
+      UPDATE outreach_leads
+      SET custom_fields = COALESCE(custom_fields, '{}'::jsonb) - 'gmailDraftId'
+      WHERE id IN (
+        SELECT ol.id
+        FROM outreach_leads ol
+        INNER JOIN outreach_campaigns oc ON oc.id = ol.campaign_id
+        WHERE oc.organization_id = ${record.organizationId}::uuid
+          AND lower(ol.email) = lower(${email})
+      )
+    `);
+
+    if (mailboxId) {
+      await tx.execute(sql`
+        UPDATE outreach_leads
+        SET mailbox_id = ${mailboxId}::uuid,
+            updated_at = now()
+        WHERE sequence_status = 'pending'
+          AND id IN (
+            SELECT ol.id
+            FROM outreach_leads ol
+            INNER JOIN outreach_campaigns oc ON oc.id = ol.campaign_id
+            WHERE oc.organization_id = ${record.organizationId}::uuid
+              AND lower(ol.email) = lower(${email})
+          )
+      `);
+
+      await tx.execute(sql`
+        UPDATE outreach_emails
+        SET mailbox_id = ${mailboxId}::uuid,
+            gmail_message_id = CASE WHEN gmail_message_id LIKE 'r%' THEN NULL ELSE gmail_message_id END,
+            thread_id = CASE WHEN thread_id LIKE 'r%' THEN NULL ELSE thread_id END
+        WHERE status = 'scheduled'
+          AND lead_id IN (
+            SELECT ol.id
+            FROM outreach_leads ol
+            INNER JOIN outreach_campaigns oc ON oc.id = ol.campaign_id
+            WHERE oc.organization_id = ${record.organizationId}::uuid
+              AND lower(ol.email) = lower(${email})
+          )
+      `);
+    }
+  }
+
+  if (person?.companyId) {
+    await tx.execute(sql`
+      UPDATE companies
+      SET custom = COALESCE(custom, '{}'::jsonb) - 'x_gmail_draft_id',
+          raw = COALESCE(raw, '{}'::jsonb) - 'x_gmail_draft_id'
+      WHERE id = ${person.companyId}::uuid
+    `);
+  }
+}
+
+function resolveDraftRecipientEmail(
+  draft: Pick<CrmDraft, "request">,
+  person: { email: string | null } | undefined,
+): string | null {
+  const reqObj = draft.request && typeof draft.request === "object"
+    ? (draft.request as Record<string, unknown>)
+    : null;
+  if (reqObj && typeof reqObj.to === "string" && reqObj.to.trim()) {
+    return reqObj.to.trim();
+  }
+  return person?.email?.trim() || null;
+}
+
 export async function getOrCreateDefaultEmailConversation(
   tx: CrmTransaction,
   recordId: string,
   fromEmail?: string,
+  options: { companyCode?: string } = {},
 ): Promise<typeof crmConversations.$inferSelect> {
   const [record] = await tx
     .select()
@@ -897,30 +1134,92 @@ export async function getOrCreateDefaultEmailConversation(
     .limit(1);
   if (!record) throw new CrmNotFoundError("CRM record", recordId);
 
-  const [existing] = await tx
+  if (fromEmail?.trim()) {
+    const resolved = await validateAndResolveFromEmail(tx, fromEmail);
+    const { conversation } = await upsertConversationInTransaction(tx, {
+      crmRecordId: record.id,
+      personId: record.personId,
+      channel: "email",
+      accountRef: resolved.accountRef,
+    });
+    return conversation;
+  }
+
+  const existingConversations = await tx
     .select()
     .from(crmConversations)
-    .where(and(inOrg(crmConversations), eq(crmConversations.crmRecordId, record.id), eq(crmConversations.channel, "email")))
-    .orderBy(desc(crmConversations.createdAt))
-    .limit(1);
-  if (existing) return existing;
+    .where(and(
+      inOrg(crmConversations),
+      eq(crmConversations.crmRecordId, record.id),
+      eq(crmConversations.channel, "email"),
+    ))
+    .orderBy(desc(crmConversations.createdAt));
 
-  let resolvedAccountRef = fromEmail?.trim();
-  if (!resolvedAccountRef) {
-    const [connectedMailbox] = await tx
-      .select({ emailAddress: mailboxes.emailAddress })
+  for (const candidate of existingConversations) {
+    const [[msgRow], [sentDraftRow], [activeRunRow]] = await Promise.all([
+      tx
+        .select({ total: count() })
+        .from(crmConversationMessages)
+        .where(eq(crmConversationMessages.conversationId, candidate.id)),
+      tx
+        .select({ total: count() })
+        .from(crmDrafts)
+        .where(and(
+          eq(crmDrafts.conversationId, candidate.id),
+          inArray(crmDrafts.status, ["sending", "sent", "delivery_uncertain"]),
+        )),
+      tx
+        .select({ total: count() })
+        .from(crmSequenceRuns)
+        .where(and(
+          eq(crmSequenceRuns.conversationId, candidate.id),
+          inArray(crmSequenceRuns.status, ["active", "paused"]),
+        )),
+    ]);
+    if (
+      Number(msgRow?.total ?? 0) > 0 ||
+      Number(sentDraftRow?.total ?? 0) > 0 ||
+      Number(activeRunRow?.total ?? 0) > 0
+    ) {
+      return candidate;
+    }
+  }
+
+  const [[profile], [settings], connectedMailboxes] = await Promise.all([
+    tx
+      .select({ person: people, company: companies })
+      .from(people)
+      .leftJoin(companies, eq(companies.id, people.companyId))
+      .where(and(inOrg(people), eq(people.id, record.personId)))
+      .limit(1),
+    tx
+      .select({ draftInstructions: crmSettings.draftInstructions })
+      .from(crmSettings)
+      .where(eq(crmSettings.pipelineId, record.pipelineId))
+      .limit(1),
+    tx
+      .select({
+        emailAddress: mailboxes.emailAddress,
+        displayName: mailboxes.displayName,
+      })
       .from(mailboxes)
       .where(and(inOrg(mailboxes), eq(mailboxes.status, "connected")))
-      .orderBy(desc(mailboxes.createdAt))
-      .limit(1);
-    resolvedAccountRef = connectedMailbox?.emailAddress ?? "ivan@linktion.cn";
-  }
+      .orderBy(desc(mailboxes.createdAt), asc(mailboxes.emailAddress)),
+  ]);
+
+  const routing = resolveOutboundEmailRouting({
+    companyCode: options.companyCode,
+    company: profile?.company ?? null,
+    person: profile?.person ?? null,
+    draftInstructions: settings?.draftInstructions ?? null,
+    connectedMailboxes,
+  });
 
   const { conversation } = await upsertConversationInTransaction(tx, {
     crmRecordId: record.id,
     personId: record.personId,
     channel: "email",
-    accountRef: resolvedAccountRef,
+    accountRef: routing.fromEmail,
   });
   return conversation;
 }
@@ -933,7 +1232,12 @@ export async function createOrGenerateInitialDraft(
   type SetupResult =
     | { kind: "existing"; draft: CrmDraft }
     | { kind: "manual"; draft: CrmDraft; created: boolean }
-    | { kind: "need_ai"; recordId: string; existingDraft: CrmDraft | null };
+    | {
+        kind: "need_ai";
+        recordId: string;
+        targetConversationId: string;
+        existingDraft: CrmDraft | null;
+      };
 
   const setup: SetupResult = await withCrmTransaction(async (tx): Promise<SetupResult> => {
     let recordId = input.recordId?.trim();
@@ -1015,13 +1319,19 @@ export async function createOrGenerateInitialDraft(
       .limit(1)
       .for("update");
 
-    const conversation = await getOrCreateDefaultEmailConversation(tx, record.id, input.fromEmail);
+    const conversation = await getOrCreateDefaultEmailConversation(
+      tx,
+      record.id,
+      input.fromEmail,
+      { companyCode: input.companyCode },
+    );
 
     if (input.bodyText?.trim()) {
       const now = new Date();
       const bodyText = input.bodyText.trim();
       const bodyHtml = input.bodyHtml?.trim() || textToParagraphHtml(bodyText);
       const subject = input.subject?.trim() || existingRecoverable?.subject || null;
+      const previousConversationId = existingRecoverable?.conversationId ?? null;
       const [manualDraft] = existingRecoverable
         ? await tx
             .update(crmDrafts)
@@ -1059,6 +1369,9 @@ export async function createOrGenerateInitialDraft(
             .returning();
 
       if (!manualDraft) throw new Error("Draft insertion did not return a row");
+      if (previousConversationId && previousConversationId !== conversation.id) {
+        await cleanupOrphanedConversation(tx, previousConversationId);
+      }
 
       await tx.update(crmRecords).set({
         workflowState: "action_required",
@@ -1080,7 +1393,12 @@ export async function createOrGenerateInitialDraft(
       return { kind: "manual", draft: manualDraft, created: !existingRecoverable };
     }
 
-    return { kind: "need_ai", recordId: record.id, existingDraft: existingRecoverable ?? null };
+    return {
+      kind: "need_ai",
+      recordId: record.id,
+      targetConversationId: conversation.id,
+      existingDraft: existingRecoverable ?? null,
+    };
   });
 
   if (setup.kind === "existing") {
@@ -1095,7 +1413,11 @@ export async function createOrGenerateInitialDraft(
     setup.recordId,
     dependencies,
     revision,
-    { targetDraftId: setup.existingDraft?.id, personRequested: true },
+    {
+      targetDraftId: setup.existingDraft?.id,
+      targetConversationId: setup.targetConversationId,
+      personRequested: true,
+    },
   );
   if (!draft) throw new Error("Draft generation returned null (check DNC or conversation setup)");
   return { draft, created: !setup.existingDraft };
@@ -1117,9 +1439,185 @@ export async function generateDraftForStep(
   }
 }
 
+export type RebindDraftSenderResult = {
+  draft: CrmDraft;
+  fromEmail: string;
+  previousFromEmail: string | null;
+  toEmail: string | null;
+  changed: boolean;
+};
+
+/**
+ * Safely rebind the sender mailbox (`fromEmail`) on an unsent `awaiting_review`
+ * email draft without altering its body/subject, without creating a duplicate
+ * draft, and without sending or queuing it.
+ *
+ * Rejects `sent`, `sending`, `delivery_uncertain`, queued (`autoSendAt !== null`),
+ * and any draft with existing send attempts with `CrmConflictError` (HTTP 409).
+ * Repeated calls with the already-bound `fromEmail` are idempotent no-ops.
+ */
+export async function rebindDraftSender(input: {
+  draftId: string;
+  fromEmail: string;
+  revision?: number | null;
+  actorRef?: string | null;
+}): Promise<RebindDraftSenderResult> {
+  const normalizedInput = normalizeEmail(input.fromEmail);
+  if (!normalizedInput || !BASIC_EMAIL_SYNTAX.test(normalizedInput)) {
+    throw new CrmConfigurationValidationError("fromEmail must be a valid email address");
+  }
+
+  return withCrmTransaction(async (tx) => {
+    const [draft] = await tx
+      .select()
+      .from(crmDrafts)
+      .where(and(draftInOrg(), eq(crmDrafts.id, input.draftId)))
+      .limit(1)
+      .for("update");
+    if (!draft) throw new CrmNotFoundError("CRM draft", input.draftId);
+
+    await assertDraftCanRebindSender(tx, draft);
+
+    if (typeof input.revision === "number" && draft.revision !== input.revision) {
+      throw new CrmConflictError("Draft revision is stale");
+    }
+
+    const record = await lockCrmRecord(tx, draft.crmRecordId);
+    assertCurrentCrmContext(record, { contextVersion: draft.expectedContextVersion });
+
+    const resolved = await validateAndResolveFromEmail(tx, input.fromEmail);
+
+    const [[currentConversation], [personRow]] = await Promise.all([
+      tx
+        .select()
+        .from(crmConversations)
+        .where(eq(crmConversations.id, draft.conversationId))
+        .limit(1),
+      tx
+        .select({ email: people.email, companyId: people.companyId })
+        .from(people)
+        .where(and(eq(people.organizationId, record.organizationId), eq(people.id, record.personId)))
+        .limit(1),
+    ]);
+
+    const previousFromEmail = currentConversation?.accountRef?.trim() || null;
+    const reqObj =
+      draft.request && typeof draft.request === "object"
+        ? (draft.request as Record<string, unknown>)
+        : null;
+    const hasStaleRequestFrom = Boolean(
+      reqObj &&
+        typeof reqObj.from === "string" &&
+        normalizeEmail(reqObj.from) !== normalizeEmail(resolved.accountRef),
+    );
+
+    if (
+      currentConversation &&
+      normalizeEmail(previousFromEmail) === normalizeEmail(resolved.accountRef) &&
+      !hasStaleRequestFrom
+    ) {
+      return {
+        draft,
+        fromEmail: currentConversation.accountRef,
+        previousFromEmail: currentConversation.accountRef,
+        toEmail: resolveDraftRecipientEmail(draft, personRow),
+        changed: false,
+      };
+    }
+
+    if (
+      (draft.replyForMessageId !== null || draft.sequenceStepRunId !== null) &&
+      normalizeEmail(previousFromEmail) !== normalizeEmail(resolved.accountRef)
+    ) {
+      throw new CrmConflictError(
+        "Cannot rebind fromEmail on a draft linked to an existing reply message or sequence step",
+      );
+    }
+
+    const { conversation: targetConversation } = await upsertConversationInTransaction(tx, {
+      crmRecordId: record.id,
+      personId: record.personId,
+      channel: "email",
+      accountRef: resolved.accountRef,
+    });
+
+    const cleanedRequest = reqObj
+      ? Object.fromEntries(
+          Object.entries(reqObj).filter(([k]) => k !== "gmailDraftId" && k !== "from"),
+        )
+      : draft.request;
+
+    const now = new Date();
+    const previousConversationId = draft.conversationId;
+    const [updated] = await tx
+      .update(crmDrafts)
+      .set({
+        conversationId: targetConversation.id,
+        status: "awaiting_review",
+        autoSendAt: null,
+        request: cleanedRequest,
+        revision: draft.revision + 1,
+        updatedAt: now,
+      })
+      .where(eq(crmDrafts.id, draft.id))
+      .returning();
+    if (!updated) throw new Error("CRM draft sender rebind did not return a row");
+
+    await tx.execute(sql`
+      UPDATE crm_conversations
+      SET provider_thread_id = NULL
+      WHERE id = ${targetConversation.id}::uuid
+        AND provider_thread_id LIKE 'r%'
+    `);
+
+    if (previousConversationId && previousConversationId !== targetConversation.id) {
+      await cleanupOrphanedConversation(tx, previousConversationId);
+    }
+
+    await syncSenderAcrossInboxAndOutreach(
+      tx,
+      record,
+      personRow,
+      targetConversation.accountRef,
+      resolved.mailboxId,
+    );
+
+    await appendCrmEvent(tx, {
+      personId: record.personId,
+      crmRecordId: record.id,
+      pipelineId: record.pipelineId,
+      eventType: "draft.sender_rebound",
+      actorType: "authenticated_operator",
+      actorRef: input.actorRef ?? null,
+      fromData: {
+        draftId: draft.id,
+        revision: draft.revision,
+        conversationId: previousConversationId,
+        fromEmail: previousFromEmail,
+      },
+      toData: {
+        draftId: draft.id,
+        revision: updated.revision,
+        conversationId: targetConversation.id,
+        fromEmail: targetConversation.accountRef,
+      },
+      contextVersion: record.contextVersion,
+    });
+
+    return {
+      draft: updated,
+      fromEmail: targetConversation.accountRef,
+      previousFromEmail,
+      toEmail: resolveDraftRecipientEmail(updated, personRow),
+      changed: true,
+    };
+  });
+}
+
 export async function updateDraft(input: {
   draftId: string;
   revision?: number | null;
+  fromEmail?: string | null;
   subject?: string | null;
   bodyText: string;
   bodyHtml?: string | null;
@@ -1127,11 +1625,20 @@ export async function updateDraft(input: {
 }): Promise<CrmDraft> {
   const bodyText = input.bodyText.trim();
   if (!bodyText) throw new Error("Draft body is required");
+  const requestedFromEmail = input.fromEmail?.trim() || null;
+  if (requestedFromEmail) {
+    const normalizedInput = normalizeEmail(requestedFromEmail);
+    if (!normalizedInput || !BASIC_EMAIL_SYNTAX.test(normalizedInput)) {
+      throw new CrmConfigurationValidationError("fromEmail must be a valid email address");
+    }
+  }
   return withCrmTransaction(async (tx) => {
     const [draft] = await tx.select().from(crmDrafts)
       .where(and(draftInOrg(), eq(crmDrafts.id, input.draftId))).limit(1).for("update");
     if (!draft) throw new CrmNotFoundError("CRM draft", input.draftId);
-    if (!["awaiting_review", "failed"].includes(draft.status)) {
+    if (requestedFromEmail) {
+      await assertDraftCanRebindSender(tx, draft);
+    } else if (!["awaiting_review", "failed"].includes(draft.status)) {
       throw new CrmConflictError("Only awaiting-review or failed drafts can be edited");
     }
     if (typeof input.revision === "number" && draft.revision !== input.revision) {
@@ -1139,14 +1646,46 @@ export async function updateDraft(input: {
     }
     const record = await lockCrmRecord(tx, draft.crmRecordId);
     assertCurrentCrmContext(record, { contextVersion: draft.expectedContextVersion });
+
+    let targetConversationId = draft.conversationId;
+    let resolvedSender: { accountRef: string; mailboxId: string | null } | null = null;
+    if (requestedFromEmail) {
+      resolvedSender = await validateAndResolveFromEmail(tx, requestedFromEmail);
+      const [currentConv] = await tx
+        .select()
+        .from(crmConversations)
+        .where(eq(crmConversations.id, draft.conversationId))
+        .limit(1);
+      if (normalizeEmail(currentConv?.accountRef) !== normalizeEmail(resolvedSender.accountRef)) {
+        if (draft.replyForMessageId !== null || draft.sequenceStepRunId !== null) {
+          throw new CrmConflictError(
+            "Cannot rebind fromEmail on a draft linked to an existing reply message or sequence step",
+          );
+        }
+        const { conversation: targetConversation } = await upsertConversationInTransaction(tx, {
+          crmRecordId: record.id,
+          personId: record.personId,
+          channel: "email",
+          accountRef: resolvedSender.accountRef,
+        });
+        targetConversationId = targetConversation.id;
+      }
+    }
+
     const subject = draft.channel === "email" ? input.subject?.trim() || draft.subject : null;
     if (draft.channel === "email" && !subject) throw new Error("Email subject is required");
     const editedBodyHtml = input.bodyHtml?.trim() || textToParagraphHtml(bodyText);
     const cleanedRequest = draft.request && typeof draft.request === "object"
-      ? Object.fromEntries(Object.entries(draft.request as Record<string, unknown>).filter(([k]) => k !== "gmailDraftId"))
+      ? Object.fromEntries(
+          Object.entries(draft.request as Record<string, unknown>).filter(
+            ([k]) => k !== "gmailDraftId" && (!requestedFromEmail || k !== "from"),
+          ),
+        )
       : draft.request;
     const now = new Date();
+    const previousConversationId = draft.conversationId;
     const [updated] = await tx.update(crmDrafts).set({
+      conversationId: targetConversationId,
       subject,
       editedBodyText: bodyText,
       editedBodyHtml,
@@ -1164,22 +1703,48 @@ export async function updateDraft(input: {
         updatedAt: now,
       }).where(eq(crmRecords.id, record.id));
     }
-    if (draft.conversationId) {
+    if (targetConversationId) {
       await tx.execute(sql`
         UPDATE crm_conversations
         SET provider_thread_id = NULL
-        WHERE id = ${draft.conversationId}::uuid
+        WHERE id = ${targetConversationId}::uuid
           AND provider_thread_id LIKE 'r%'
       `);
     }
+    if (previousConversationId && previousConversationId !== targetConversationId) {
+      await cleanupOrphanedConversation(tx, previousConversationId);
+    }
     if (draft.channel === "email") {
       await syncEmailDraftAcrossInboxAndOutreach(tx, record, subject, bodyText, editedBodyHtml);
+      if (resolvedSender) {
+        const [personRow] = await tx
+          .select({ email: people.email, companyId: people.companyId })
+          .from(people)
+          .where(and(eq(people.organizationId, record.organizationId), eq(people.id, record.personId)))
+          .limit(1);
+        await syncSenderAcrossInboxAndOutreach(
+          tx,
+          record,
+          personRow,
+          resolvedSender.accountRef,
+          resolvedSender.mailboxId,
+        );
+      }
     }
     await appendCrmEvent(tx, {
       personId: record.personId, crmRecordId: record.id, pipelineId: record.pipelineId,
       eventType: "draft.edited", actorType: "authenticated_operator", actorRef: input.actorRef,
-      fromData: { draftId: draft.id, revision: draft.revision },
-      toData: { draftId: draft.id, revision: updated!.revision }, contextVersion: record.contextVersion,
+      fromData: {
+        draftId: draft.id,
+        revision: draft.revision,
+        ...(requestedFromEmail ? { conversationId: previousConversationId } : {}),
+      },
+      toData: {
+        draftId: draft.id,
+        revision: updated!.revision,
+        ...(resolvedSender ? { conversationId: targetConversationId, fromEmail: resolvedSender.accountRef } : {}),
+      },
+      contextVersion: record.contextVersion,
     });
     return updated!;
   });
