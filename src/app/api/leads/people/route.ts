@@ -87,6 +87,7 @@ async function createPerson(req: NextRequest) {
       title: typeof body.title === "string" ? body.title : null,
       companyName: typeof body.companyName === "string" ? body.companyName : null,
       companyDomain: typeof body.companyDomain === "string" ? body.companyDomain : null,
+      companyCode: typeof body.companyCode === "string" ? body.companyCode : typeof body.code === "string" ? body.code : null,
       phone: typeof body.phone === "string" ? body.phone : null,
       notes: typeof body.notes === "string" ? body.notes : null,
       workflowState,

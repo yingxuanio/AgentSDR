@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { messageParticipants } from "./participants";
 import { formatAiInstructions } from "./ai/instructions";
 import { db } from "@/lib/db";
@@ -15,9 +15,12 @@ import {
   type CrmTransaction,
   withCrmTransaction,
 } from "./repository";
-import { draftInOrg, lockCrmRecord } from "./records";
+import { draftInOrg, ensurePersonCrmRecord, lockCrmRecord } from "./records";
 import { releaseStepRunDraftLinks } from "./sequences";
 import { currentStageMoveInTransaction } from "./stageMove";
+import { upsertConversationInTransaction } from "./conversations";
+import { normalizeEmail } from "@/lib/leads/identity";
+import { mailboxes } from "@/lib/outreach/schema";
 import {
   crmClassifications,
   crmConversationMessages,
@@ -599,10 +602,6 @@ async function loadFallbackDraftContext(
     .limit(1)
     .for("update");
 
-  // Both of these are "nothing to draft", not failures — returning null keeps
-  // the job from retrying three times over a record we deliberately skip.
-  if (!record.latestInboundMessageId && !existing?.conversationId) return null;
-
   let conversationRow: typeof crmConversations.$inferSelect | undefined;
   if (record.latestInboundMessageId) {
     const [found] = await tx
@@ -618,6 +617,15 @@ async function loadFallbackDraftContext(
       .select()
       .from(crmConversations)
       .where(eq(crmConversations.id, existing.conversationId))
+      .limit(1);
+    conversationRow = found;
+  }
+  if (!conversationRow) {
+    const [found] = await tx
+      .select()
+      .from(crmConversations)
+      .where(and(inOrg(crmConversations), eq(crmConversations.crmRecordId, record.id)))
+      .orderBy(desc(crmConversations.createdAt))
       .limit(1);
     conversationRow = found;
   }
@@ -696,6 +704,197 @@ export async function generateFallbackDraft(
     await failDraftGeneration(prepared.draft.id, error);
     throw error;
   }
+}
+
+export type InitialDraftInput = {
+  recordId?: string;
+  personId?: string;
+  email?: string;
+  companyCode?: string;
+  fromEmail?: string;
+  subject?: string;
+  bodyText?: string;
+  bodyHtml?: string;
+  feedback?: string;
+};
+
+export async function getOrCreateDefaultEmailConversation(
+  tx: CrmTransaction,
+  recordId: string,
+  fromEmail?: string,
+): Promise<typeof crmConversations.$inferSelect> {
+  const [record] = await tx
+    .select()
+    .from(crmRecords)
+    .where(and(inOrg(crmRecords), eq(crmRecords.id, recordId)))
+    .limit(1);
+  if (!record) throw new CrmNotFoundError("CRM record", recordId);
+
+  const [existing] = await tx
+    .select()
+    .from(crmConversations)
+    .where(and(inOrg(crmConversations), eq(crmConversations.crmRecordId, record.id), eq(crmConversations.channel, "email")))
+    .orderBy(desc(crmConversations.createdAt))
+    .limit(1);
+  if (existing) return existing;
+
+  let resolvedAccountRef = fromEmail?.trim();
+  if (!resolvedAccountRef) {
+    const [connectedMailbox] = await tx
+      .select({ emailAddress: mailboxes.emailAddress })
+      .from(mailboxes)
+      .where(and(inOrg(mailboxes), eq(mailboxes.status, "connected")))
+      .orderBy(desc(mailboxes.createdAt))
+      .limit(1);
+    resolvedAccountRef = connectedMailbox?.emailAddress ?? "ivan@linktion.cn";
+  }
+
+  const { conversation } = await upsertConversationInTransaction(tx, {
+    crmRecordId: record.id,
+    personId: record.personId,
+    channel: "email",
+    accountRef: resolvedAccountRef,
+  });
+  return conversation;
+}
+
+export async function createOrGenerateInitialDraft(
+  input: InitialDraftInput,
+  actorRef?: string | null,
+): Promise<{ draft: CrmDraft; created: boolean }> {
+  type SetupResult =
+    | { kind: "existing"; draft: CrmDraft }
+    | { kind: "manual"; draft: CrmDraft }
+    | { kind: "need_ai"; recordId: string };
+
+  const setup: SetupResult = await withCrmTransaction(async (tx): Promise<SetupResult> => {
+    let recordId = input.recordId?.trim();
+    let personId = input.personId?.trim();
+
+    if (!recordId && !personId) {
+      if (input.email?.trim()) {
+        const normalized = normalizeEmail(input.email.trim());
+        const [found] = await tx
+          .select({ id: people.id })
+          .from(people)
+          .where(and(inOrg(people), sql`lower(${people.email}) = ${normalized}`))
+          .limit(1);
+        personId = found?.id;
+      } else if (input.companyCode?.trim()) {
+        const targetCode = input.companyCode.trim().toUpperCase();
+        const [foundComp] = await tx
+          .select({ id: companies.id })
+          .from(companies)
+          .where(and(
+            inOrg(companies),
+            or(
+              sql`upper(${companies.custom}->>'x_code') = ${targetCode}`,
+              sql`upper(${companies.raw}->>'company_code') = ${targetCode}`,
+              sql`upper(${companies.raw}->>'x_code') = ${targetCode}`,
+            ),
+          ))
+          .limit(1);
+        if (foundComp) {
+          const [foundPerson] = await tx
+            .select({ id: people.id })
+            .from(people)
+            .where(and(inOrg(people), eq(people.companyId, foundComp.id)))
+            .limit(1);
+          personId = foundPerson?.id;
+        }
+      }
+    }
+
+    if (!recordId && personId) {
+      const crmRes = await ensurePersonCrmRecord(tx, { personId });
+      recordId = crmRes.record.id;
+    }
+
+    if (!recordId) {
+      throw new Error("Could not resolve recordId, personId, email, or companyCode to an existing CRM entity");
+    }
+
+    const record = await lockCrmRecord(tx, recordId);
+    if (await isPersonDoNotContact(tx, record.personId)) {
+      throw new CrmConflictError("This person is marked Do Not Contact");
+    }
+
+    const [existingAwaiting] = await tx
+      .select()
+      .from(crmDrafts)
+      .where(and(
+        eq(crmDrafts.crmRecordId, record.id),
+        eq(crmDrafts.status, "awaiting_review"),
+      ))
+      .orderBy(desc(crmDrafts.createdAt))
+      .limit(1);
+
+    if (existingAwaiting) {
+      return { kind: "existing", draft: existingAwaiting };
+    }
+
+    const conversation = await getOrCreateDefaultEmailConversation(tx, record.id, input.fromEmail);
+
+    if (input.bodyText?.trim()) {
+      const now = new Date();
+      const bodyText = input.bodyText.trim();
+      const [manualDraft] = await tx
+        .insert(crmDrafts)
+        .values({
+          crmRecordId: record.id,
+          conversationId: conversation.id,
+          replyForMessageId: null,
+          sequenceStepRunId: null,
+          expectedContextVersion: record.contextVersion,
+          channel: "email",
+          subject: input.subject?.trim() || null,
+          editedBodyText: bodyText,
+          editedBodyHtml: input.bodyHtml?.trim() || textToParagraphHtml(bodyText),
+          status: "awaiting_review",
+        })
+        .returning();
+
+      if (!manualDraft) throw new Error("Draft insertion did not return a row");
+
+      await tx.update(crmRecords).set({
+        workflowState: "action_required",
+        nextActionAt: null,
+        updatedAt: now,
+      }).where(eq(crmRecords.id, record.id));
+
+      await appendCrmEvent(tx, {
+        personId: record.personId,
+        crmRecordId: record.id,
+        pipelineId: record.pipelineId,
+        eventType: "draft.created",
+        actorType: "authenticated_operator",
+        actorRef: actorRef ?? null,
+        toData: { draftId: manualDraft.id, channel: "email", status: "awaiting_review" },
+        contextVersion: record.contextVersion,
+      });
+
+      return { kind: "manual", draft: manualDraft };
+    }
+
+    return { kind: "need_ai", recordId: record.id };
+  });
+
+  if (setup.kind === "existing") {
+    return { draft: setup.draft, created: false };
+  }
+  if (setup.kind === "manual") {
+    return { draft: setup.draft, created: true };
+  }
+
+  const revision: DraftRevisionRequest | null = input.feedback?.trim()
+    ? {
+        previousDraft: { subject: input.subject?.trim() || null, bodyText: input.bodyText?.trim() || "" },
+        reviewerFeedback: input.feedback.trim(),
+      }
+    : null;
+  const draft = await generateFallbackDraft(setup.recordId, {}, revision);
+  if (!draft) throw new Error("Draft generation returned null (check DNC or conversation setup)");
+  return { draft, created: true };
 }
 
 export async function generateDraftForStep(

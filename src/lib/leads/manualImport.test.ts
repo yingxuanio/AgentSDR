@@ -18,6 +18,7 @@ describe("manual People import", () => {
       title: null,
       companyName: null,
       companyDomain: null,
+      companyCode: null,
       notes: null,
       phone: null,
       workflowState: undefined,

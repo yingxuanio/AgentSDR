@@ -116,10 +116,15 @@ export async function upsertCompany(
   const domain = normalizeCompanyDomain(input.domain);
   if (!domain) return null;
 
+  const rawValues = input.raw ?? {};
+  const customValues: Record<string, unknown> = {};
+  if (typeof rawValues.x_code === "string") customValues.x_code = rawValues.x_code;
+  if (typeof rawValues.company_code === "string") customValues.x_code = rawValues.company_code;
+
   const values = {
     name: clean(input.name),
     linkedinUrl: clean(input.linkedinUrl),
-    raw: input.raw ?? {},
+    raw: rawValues,
   };
   const cached = context?.companyCache?.get(domain);
   if (cached) {
@@ -133,6 +138,7 @@ export async function upsertCompany(
         name: values.name ?? cached.name,
         linkedinUrl: values.linkedinUrl ?? cached.linkedinUrl,
         raw: { ...(cached.raw ?? {}), ...values.raw },
+        custom: { ...(cached.custom ?? {}), ...customValues },
         updatedAt: new Date(),
       })
       .where(and(inOrg(companies), eq(companies.id, cached.id)))
@@ -151,6 +157,7 @@ export async function upsertCompany(
         name: values.name ?? existing.name,
         linkedinUrl: values.linkedinUrl ?? existing.linkedinUrl,
         raw: { ...(existing.raw ?? {}), ...values.raw },
+        custom: { ...(existing.custom ?? {}), ...customValues },
         updatedAt: new Date(),
       })
       .where(and(inOrg(companies), eq(companies.id, existing.id)))
@@ -161,7 +168,7 @@ export async function upsertCompany(
 
   const [created] = await tx
     .insert(companies)
-    .values({ organizationId: currentOrganizationId(), domain, ...values, source: input.source })
+    .values({ organizationId: currentOrganizationId(), domain, ...values, custom: customValues, source: input.source })
     .returning();
   context?.companyCache?.set(domain, created);
   return created;

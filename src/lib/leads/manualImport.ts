@@ -20,6 +20,7 @@ export type ManualPersonInput = {
   title?: string | null;
   companyName?: string | null;
   companyDomain?: string | null;
+  companyCode?: string | null;
   notes?: string | null;
   /** Free-form ("+91 98765 43210", "0091…"). Invalid input is dropped, not rejected — see normalizeManualPersonInput. */
   phone?: string | null;
@@ -54,6 +55,7 @@ export function normalizeManualPersonInput(input: ManualPersonInput, phoneCountr
     title: clean(input.title),
     companyName: clean(input.companyName),
     companyDomain: clean(input.companyDomain),
+    companyCode: clean(input.companyCode ?? (input as Record<string, unknown>).code as string),
     notes: clean(input.notes),
     phone: input.phone ? normalizePhone(input.phone, phoneCountry) : null,
     workflowState: input.workflowState,
@@ -123,6 +125,7 @@ export async function upsertManualPerson(input: ManualPersonInput) {
       company: normalized.companyName || normalized.companyDomain ? {
         name: normalized.companyName,
         domain: normalized.companyDomain,
+        raw: normalized.companyCode ? { company_code: normalized.companyCode, x_code: normalized.companyCode } : undefined,
       } : null,
       raw: Object.keys(rawData).length ? rawData : undefined,
       source: "manual-people-import",

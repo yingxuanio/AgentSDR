@@ -6,7 +6,7 @@ import { crmConversations, crmDrafts, crmRecords, type CrmDraftStatus } from "@/
 import { draftInOrg } from "@/lib/crm/records";
 import { crmOperationErrorResponse, requireInteger } from "@/lib/crm/api";
 import { parseOptionalText, parseRequiredText, readCrmJson } from "@/lib/crm/categories";
-import { regenerateDraft, updateDraft } from "@/lib/crm/drafts";
+import { createOrGenerateInitialDraft, regenerateDraft, updateDraft } from "@/lib/crm/drafts";
 import { requireCrmMutationContext } from "@/lib/crm/http";
 import { requireOrgContext } from "@/lib/auth/context";
 import { runInOrganization } from "@/lib/tenancy/scope";
@@ -125,6 +125,53 @@ async function handleBatchOrSingleMutate(request: NextRequest) {
 
     const allDrafts = await loadOrgDrafts("awaiting_review");
 
+    // Mode 0: Initial draft generation / creation (`{ action: "generate" | "create", recordId?, personId?, email?, companyCode?, fromEmail?, subject?, bodyText?, feedback? }`)
+    if (body.action === "generate" || body.action === "create") {
+      const recordId = typeof body.recordId === "string" ? body.recordId.trim() : undefined;
+      const personId = typeof body.personId === "string" ? body.personId.trim() : undefined;
+      const email = typeof body.email === "string" ? body.email.trim() : typeof body.toEmail === "string" ? body.toEmail.trim() : undefined;
+      const companyCode = typeof body.companyCode === "string" ? body.companyCode.trim() : typeof body.code === "string" ? body.code.trim() : undefined;
+      const fromEmail = typeof body.fromEmail === "string" ? body.fromEmail.trim() : undefined;
+      const subject = typeof body.subject === "string" ? body.subject.trim() : undefined;
+      const bodyText = typeof body.bodyText === "string" ? body.bodyText.trim() : typeof body.body === "string" ? body.body.trim() : undefined;
+      const bodyHtml = typeof body.bodyHtml === "string" ? body.bodyHtml.trim() : undefined;
+      const feedback = typeof body.feedback === "string" ? body.feedback.trim() : undefined;
+
+      const result = await createOrGenerateInitialDraft(
+        {
+          recordId,
+          personId,
+          email,
+          companyCode,
+          fromEmail,
+          subject,
+          bodyText,
+          bodyHtml,
+          feedback,
+        },
+        ctx.userName,
+      );
+
+      return Response.json(
+        {
+          created: result.created,
+          draft: {
+            id: result.draft.id,
+            crmRecordId: result.draft.crmRecordId,
+            conversationId: result.draft.conversationId,
+            revision: result.draft.revision,
+            status: result.draft.status,
+            channel: result.draft.channel,
+            subject: result.draft.subject,
+            bodyText: result.draft.editedBodyText ?? result.draft.aiBodyText,
+            bodyHtml: result.draft.editedBodyHtml ?? result.draft.aiBodyHtml,
+            updatedAt: result.draft.updatedAt.toISOString(),
+          },
+        },
+        { status: result.created ? 201 : 200 },
+      );
+    }
+
     // Mode 1: Batch AI regenerate by instruction (`{ action: "regenerate", feedback: "...", draftIds?: [...], companyCodes?: [...] }`)
     if (body.action === "regenerate") {
       const feedback = parseRequiredText(body.feedback, "feedback", 4_000);
@@ -134,10 +181,28 @@ async function handleBatchOrSingleMutate(request: NextRequest) {
       const codeFilter = Array.isArray(body.companyCodes)
         ? new Set(body.companyCodes.map((v) => String(v).trim().toUpperCase()))
         : null;
+      const personIdFilter = Array.isArray(body.personIds)
+        ? new Set(body.personIds.map((v) => String(v).trim()))
+        : null;
+      const recordIdFilter = Array.isArray(body.recordIds)
+        ? new Set(body.recordIds.map((v) => String(v).trim()))
+        : null;
+      const emailFilter = Array.isArray(body.emails)
+        ? new Set(body.emails.map((v) => String(v).trim().toLowerCase()))
+        : null;
 
       const targets = allDrafts.filter((d) => {
         if (idFilter && idFilter.size > 0 && !idFilter.has(d.id)) return false;
         if (codeFilter && codeFilter.size > 0 && (!d.company?.code || !codeFilter.has(d.company.code.toUpperCase()))) {
+          return false;
+        }
+        if (personIdFilter && personIdFilter.size > 0 && !personIdFilter.has(d.person.id)) {
+          return false;
+        }
+        if (recordIdFilter && recordIdFilter.size > 0 && !recordIdFilter.has(d.crmRecordId)) {
+          return false;
+        }
+        if (emailFilter && emailFilter.size > 0 && (!d.toEmail || !emailFilter.has(d.toEmail.toLowerCase()))) {
           return false;
         }
         return true;
