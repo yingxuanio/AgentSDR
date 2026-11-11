@@ -72,15 +72,12 @@ const FAKE_PERSON_NAME_RE =
 const TECH_VENDOR_COMPANY_RE =
   /\b(software|saas|artificial\s+intelligence|ai\s+lab|ai\s+solutions|ai\s+tech|it\s+solutions|it\s+consulting|system\s+integration|cyberport|hkstp|cloud\s+computing|blockchain|web3|martech|devops|robotics|app\s+development|digital\s+agency|tech\s+studio)\b|软件开发|軟件開發|人工智能|系统集成商|系統集成商|資訊科技解決方案|资讯科技解决方案|軟體開發|網路科技|數位行銷科技/i;
 
-// Common Simplified-only characters that frequently leak into HK/TW Traditional Chinese drafts
-const SIMPLIFIED_BLEED_CHARS = [
-  "贵", "业", "务", "软", "开", "发", "团", "队", "沟", "产", "询", "盘", "系", "统", "联",
-  "门", "订", "单", "质", "测", "试", "专", "码", "数", "据", "现", "阶", "欢", "迎", "简",
-  "绍", "经", "验", "项", "进", "一步", "设", "备", "贸", "厂", "销", "户", "选",
+// Strictly unambiguous Simplified-only codepoints (excludes chars also valid in Traditional Chinese like 系/迎/户/选)
+const STRICT_SIMPLIFIED_CHARS = [
+  "贵", "业", "务", "软", "开", "发", "团", "队", "沟", "产", "询", "盘", "统", "联",
+  "门", "订", "单", "质", "测", "试", "专", "码", "数", "据", "现", "阶", "欢", "简",
+  "绍", "经", "验", "项", "进", "设", "备", "贸", "厂", "销", "亿", "万", "们", "为",
 ];
-
-// Exclude "一步" (same in both) — keep strict single Simplified-only chars
-const STRICT_SIMPLIFIED_CHARS = SIMPLIFIED_BLEED_CHARS.filter((c) => c.length === 1 && c !== "选");
 
 const mxCache = new Map<string, boolean>();
 

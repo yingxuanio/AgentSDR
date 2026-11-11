@@ -39,9 +39,11 @@ export function inferCodePrefix(input: {
   return "INTL";
 }
 
+const LEGACY_OUTLIER_CODES = new Set(["HK97", "HK98", "HK999", "TW999"]);
+
 /**
- * Computes next sequential company code per prefix, ignoring outlier test codes
- * (e.g., HK97, HK98, HK999, TW999) while the contiguous sequence is below 95.
+ * Computes next sequential company code per prefix, ignoring seeded outlier test fixtures
+ * (HK97, HK98, HK999, TW999) while never colliding with any used code.
  */
 export function computeNextCodesFromExisting(codes: readonly string[]): Record<CodePrefix, string> {
   const buckets: Record<CodePrefix, Set<number>> = {
@@ -50,6 +52,13 @@ export function computeNextCodesFromExisting(codes: readonly string[]): Record<C
     MO: new Set(),
     CN: new Set(),
     INTL: new Set(),
+  };
+  const normalMaxByPrefix: Record<CodePrefix, number> = {
+    HK: 0,
+    TW: 0,
+    MO: 0,
+    CN: 0,
+    INTL: 0,
   };
 
   for (const raw of codes) {
@@ -60,18 +69,16 @@ export function computeNextCodesFromExisting(codes: readonly string[]): Record<C
     const num = Number.parseInt(match[2]!, 10);
     if (Number.isFinite(num) && num > 0) {
       buckets[prefix].add(num);
+      if (!LEGACY_OUTLIER_CODES.has(clean) && num > normalMaxByPrefix[prefix]) {
+        normalMaxByPrefix[prefix] = num;
+      }
     }
   }
 
   const result = {} as Record<CodePrefix, string>;
   for (const prefix of ["HK", "TW", "MO", "CN", "INTL"] as const) {
     const used = buckets[prefix];
-    // Find max code below 95 (since HK97/HK98/HK999/TW999 were seeded test fixtures)
-    let normalMax = 0;
-    for (const n of used) {
-      if (n < 95 && n > normalMax) normalMax = n;
-    }
-    let candidate = normalMax + 1;
+    let candidate = normalMaxByPrefix[prefix] + 1;
     while (used.has(candidate)) {
       candidate += 1;
     }

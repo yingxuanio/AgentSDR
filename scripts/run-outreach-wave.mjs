@@ -57,16 +57,6 @@ const SHARDS = [
     ],
   },
   {
-    id: "hk-food-consumer",
-    regionLabel: "香港",
-    vertical: "香港食品餐饮原料进出口批发、家居日用品制造出口、美妆个护或自有消费品牌",
-    searchHints: [
-      `"Managing Director" OR "Founder" "Hong Kong" ("Food" OR "Trading" OR "Houseware" OR "kitchenware" OR "Cosmetics") email "@"`,
-      `"香港" ("食品貿易" OR "餐飲供應" OR "家品" OR "貿易有限公司") ("董事" OR "創辦人" OR "總經理") "聯絡我們"`,
-      `site:fhki.org.hk "Director" OR "General Manager" "@" `,
-    ],
-  },
-  {
     id: "tw-machinery-pack",
     regionLabel: "台湾",
     vertical: "台湾（台中/桃园/台南/新北）包装机械、食品机械、木工/塑胶机械或自动化加工设备制造厂",
@@ -74,6 +64,16 @@ const SHARDS = [
       `"機械工業股份有限公司" OR "機械股份有限公司" ("董事長" OR "總經理" OR "負責人") ("聯絡" OR "信箱" OR "Email")`,
       `"包裝機械" OR "塑膠機械" "股份有限公司" ("董事長" OR "總經理") "@" site:.com.tw`,
       `"台中" OR "桃園" OR "台南" "機械有限公司" ("負責人" OR "總經理") "聯絡我們" site:.tw`,
+    ],
+  },
+  {
+    id: "hk-food-consumer",
+    regionLabel: "香港",
+    vertical: "香港食品餐饮原料进出口批发、家居日用品制造出口、美妆个护或自有消费品牌",
+    searchHints: [
+      `"Managing Director" OR "Founder" "Hong Kong" ("Food" OR "Trading" OR "Houseware" OR "kitchenware" OR "Cosmetics") email "@"`,
+      `"香港" ("食品貿易" OR "餐飲供應" OR "家品" OR "貿易有限公司") ("董事" OR "創辦人" OR "總經理") "聯絡我們"`,
+      `site:fhki.org.hk "Director" OR "General Manager" "@" `,
     ],
   },
   {
@@ -133,25 +133,26 @@ function buildWorkerPrompt(shard, quota, waveWorkDir) {
   return `你是高效精准的 B2B 拓客执行 Agent。本轮你的唯一任务是为分片【${shard.id}】（方向：${shard.vertical}）寻获、核验并成功提交 **${quota} 家** 全新合格潜在客户（系统会自动完成入库、生成繁体中文开发信并按节流节奏发出邮件）。
 
 ### 一、工具与极速执行纪律（严省耗时与 Token！）
-1. **禁止读取无关代码文件、禁止使用任何浏览器/MCP工具**！全程只用 \`run_command\` 调用内置高速脚本 \`${PROSPECT_TOOL}\`。
+1. **绝对禁止触碰系统与容器**：严禁读取或修改 \`/Users/ivan/projects/AgentSDR\` 源码、严禁执行任何 \`docker\` / \`psql\` / \`lsof\` / \`curl\` 命令、严禁使用浏览器或 MCP 工具！全程**只允许**调用 \`node ${PROSPECT_TOOL}\`（与写 JSON 文件）。
 2. **所有命令已内置 API Key 与自动 CRM 批量查重**：
    - **并发搜索（自动标记 \`alreadyInCrm: true/false\`）**：
      \`node ${PROSPECT_TOOL} search ${shard.searchHints.map((q) => `'${q}'`).join(" ")}\`
-     （一次传入 3–5 个查询词！凡返回 \`alreadyInCrm: true\` 的域名直接跳过！）
+     （一次传入 3–4 个查询词！凡返回 \`alreadyInCrm: true\` 的域名直接跳过！）
    - **并发抓取网页（一次传 4–8 个 URL，自动提取 \`emails\`、\`phones\`、\`executiveHints\` 与精简摘要）**：
      \`node ${PROSPECT_TOOL} scrape "https://..." "https://..." ...\`
    - **批量提交入库+生成开发信+发送（一步完成！）**：
-     先将核验完毕的客户数组写入 \`${outJsonPath}\`，然后执行：
+     先用 \`write_file\` 将核验完毕的客户数组写入 \`${outJsonPath}\`，然后执行：
      \`node ${PROSPECT_TOOL} submit ${outJsonPath}\`
+     ⚠️ **重要**：\`submit\` 会并发生成邮件并按间隔节流发送，耗时约 25–60 秒；当命令转为后台任务运行时，**严禁调用 \`manage_task\` 轮询**，直接简短回复一句话结束当前回合，系统会在发送完毕后自动唤醒你！
 3. **2-Hop 快速止损原则（严禁恋战！）**：
    - 若某公司抓完官网首页 + About/Contact 页（或商会详情页）仍无**真实高管/负责人姓名+职务**或无**公开邮箱**，**立即放弃**！绝不对同一家公司搜索超过 2 次！
-   - 为了稳妥达成 **${quota} 家** \`status: "sent"\`（防止个别因重名或 MX 校验被拒），建议一次搜集核验 **${quota + 1} 家** 候选并提交；若首次 \`submit\` 后 \`sent\` 数量不足 ${quota} 家，立即补齐差额再 \`submit\` 一次，一旦累计 \`sent >= ${quota}\` 立即结束汇报！
+   - 为了稳妥一次性达成 **${quota} 家** \`status: "sent"\`，建议一次搜集核验 **${quota + 1} 家** 候选一并写入 JSON 后执行一次 \`submit\`；若某条被跳过或拦截导致 \`sent < ${quota}\`，直接换新候选补齐差额再 \`submit\`（绝不排查原因），一旦累计 \`sent >= ${quota}\` 立即结束汇报！
 
 ### 二、客户画像与真实性硬红线（系统 API 会自动拦截违规项！）
 1. **严禁开拓软件 / IT / AI / 科技方案商**：凡软件开发、SaaS、AI、系统集成、MarTech、数码港/科学园纯技术公司一律排除！只选**主业非数字技术的实体制造、B2B贸易批发、消费品牌、物流工程、医疗器械等传统/垂直企业**（员工 <150 人中小型企业优先；避开跨国巨型上市公司）。
 2. **实名决策/负责人必填**：\`fullName\`（真实人名，严禁填 Desk/Team/客服/负责人等代称）+ \`title\`（如 Managing Director / Director / Founder / 董事長 / 總經理 / 負責人）必须有公开页面原文印证（可结合商会名录/台湾工商公开信息与官网交叉印证）。
 3. **100% 原文公开邮箱（系统会核验抓取证据库！）**：
-   - \`email\` **必须原样出现在你本轮 \`search\` 或 \`scrape\` 抓到的页面中**（严禁猜测拼凑个人邮箱前缀！若你没抓到该邮箱，\`submit\` 会直接拦截报错！）。
+   - \`email\` **必须原样出现在你本轮 \`search\` 或 \`scrape\` 抓到的页面中**（严禁猜测拼凑个人邮箱前缀！优先选择企业独立域名邮箱或 \`@hibox.hinet.net\`/\`@netvigator.com\` 商务邮箱，尽量少用免费 \`@gmail.com\` 除非是香港工业总会/金属制造业协会等官方名录登记邮箱）。
    - 优先实名高管邮箱；若官网仅公开 \`info@\` / \`sales@\` / \`enquiry@\` / \`service@\` 等官方商务邮箱但已核实明确的董事/总经理姓名与职务，可用该实名负责人搭配该官方商务邮箱，并在 \`verificationNote\` 如实写明。**严禁使用 \`support@\`、\`cs@\`、\`hr@\`、\`jobs@\`、\`careers@\`、\`ir@\`、\`privacy@\`**。
 4. **JSON 提交格式（写入 \`${outJsonPath}\`）**：
 \`\`\`json

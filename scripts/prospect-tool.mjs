@@ -122,7 +122,7 @@ async function searchOne(query) {
         Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query, limit: 8 }),
+      body: JSON.stringify({ query, limit: 6 }),
       signal: AbortSignal.timeout(14000),
     });
     const data = await res.json();
@@ -131,10 +131,10 @@ async function searchOne(query) {
       const emails = extractEmails(text);
       if (r.url && emails.length) recordEvidence(r.url, emails, text);
       return {
-        title: r.title ?? "",
+        title: (r.title ?? "").slice(0, 90),
         url: r.url ?? "",
         domain: normalizeDomain(r.url),
-        description: (r.description ?? "").slice(0, 260),
+        desc: (r.description ?? "").slice(0, 140),
         emails: emails.length ? emails : undefined,
       };
     });
@@ -203,8 +203,8 @@ async function scrapeOne(url) {
       phones: extractPhones(md),
       linkedinUrls: linkedinUrls.length ? linkedinUrls : undefined,
       contactPages: internalContactLinks.length ? internalContactLinks : undefined,
-      executiveHints,
-      excerpt: md.replace(/\n{3,}/g, "\n\n").slice(0, 1600),
+      executiveHints: executiveHints.slice(0, 14),
+      excerpt: md.replace(/\n{3,}/g, "\n\n").slice(0, 900),
     };
   } catch (err) {
     return { url, ok: false, error: String(err?.message ?? err) };
