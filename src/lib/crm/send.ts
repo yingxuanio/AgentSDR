@@ -5,6 +5,7 @@ import { people } from "@/lib/leads/schema";
 import { connections as linkedinConnections, messages as linkedinMessages } from "@/lib/linkedin/schema";
 import { isPlatformConnected, isPlatformNotConnectedError } from "@/lib/platform/credentials";
 import { sendEmail } from "@/lib/outreach/gmail";
+import { mailboxes } from "@/lib/outreach/schema";
 import { sendMessage as sendLinkedInMessage } from "@/services/unipile.service";
 import {
   deliverWhatsappFromCrm,
@@ -154,8 +155,14 @@ export const sendThroughCrmProvider: CrmSendAdapter = async (input) => {
     if (!(await isPlatformConnected("google"))) throw new DefiniteCrmSendError("Google Workspace is not connected — connect it in Settings → Email → Connection");
     if (!input.recipientEmail) throw new DefiniteCrmSendError("The Person has no Email address");
     if (!input.subject) throw new DefiniteCrmSendError("Email subject is required");
+    const [mailbox] = await db
+      .select({ displayName: mailboxes.displayName })
+      .from(mailboxes)
+      .where(and(inOrg(mailboxes), eq(mailboxes.emailAddress, input.accountRef)))
+      .limit(1);
     const result = await sendEmail({
       from: input.accountRef,
+      fromName: mailbox?.displayName ?? null,
       to: [input.recipientEmail],
       cc: input.ccEmails?.length ? input.ccEmails : undefined,
       bcc: input.bccEmails?.length ? input.bccEmails : undefined,
@@ -558,6 +565,11 @@ async function finishSuccessfulSend(
       nextActionAt,
       updatedAt: now,
     }).where(eq(crmRecords.id, record.id));
+    if (!reconciliation && attempt.actorType !== "system" && prepared.request.channel === "email") {
+      await tx.update(mailboxes)
+        .set({ todayEmailsSent: sql`${mailboxes.todayEmailsSent} + 1`, updatedAt: now })
+        .where(and(inOrg(mailboxes), eq(mailboxes.emailAddress, prepared.request.accountRef)));
+    }
     await tx.update(crmClassifications).set({ acknowledgedAt: now, updatedAt: now })
       .where(and(
         eq(crmClassifications.crmRecordId, record.id),

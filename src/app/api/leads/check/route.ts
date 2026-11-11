@@ -1,10 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listPeoplePage } from "@/lib/leads/records";
+import { checkBatchLeads } from "@/lib/leads/outreachCheck";
 import { authContextErrorResponse, withOrgContext } from "@/lib/auth/context";
 
 export async function GET(req: NextRequest) {
   try {
     return await withOrgContext(req, () => checkLead(req));
+  } catch (error) {
+    const auth = authContextErrorResponse(error);
+    if (auth) return auth;
+    throw error;
+  }
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    return await withOrgContext(req, async () => {
+      const body = await req.json().catch(() => null);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return NextResponse.json({ error: "JSON object body is required" }, { status: 400 });
+      }
+      const result = await checkBatchLeads({
+        domains: Array.isArray(body.domains) ? body.domains : undefined,
+        emails: Array.isArray(body.emails) ? body.emails : undefined,
+        companies: Array.isArray(body.companies) ? body.companies : undefined,
+      });
+      return NextResponse.json(result);
+    });
   } catch (error) {
     const auth = authContextErrorResponse(error);
     if (auth) return auth;
