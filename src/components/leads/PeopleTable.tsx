@@ -64,7 +64,7 @@ function PersonTableRow({ row }: { row: PersonRow }) {
         ) : <Empty label="No company" />}
       </Table.Cell>
       <Table.Cell className={rowCell}><ReachIcons person={person} /></Table.Cell>
-      <Table.Cell className={rowCell}><CampaignSummary campaigns={campaigns} /></Table.Cell>
+      <Table.Cell className={rowCell}><CampaignSummary campaigns={campaigns} crm={crm} /></Table.Cell>
       <Table.Cell className={rowCell}><CrmSummary crm={crm} /></Table.Cell>
       <Table.Cell className={cn(rowCell, "pl-0 pr-2")} onClick={stop} onKeyDown={stop}>
         <div className="flex justify-end">

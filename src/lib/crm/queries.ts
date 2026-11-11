@@ -651,6 +651,12 @@ export type CrmPeopleProjection = {
   nextActionAt: Date | null;
   unacknowledgedAiChange: boolean;
   dnc: boolean;
+  latestDraft: {
+    status: string;
+    autoSendAt: Date | null;
+    channel: string;
+    subject: string | null;
+  } | null;
   contactPolicy: {
     doNotContact: boolean;
     reason: string | null;
@@ -671,20 +677,35 @@ export async function crmProjectionForPeople(personIds: string[]): Promise<Map<s
   ]);
   const policyByPerson = new Map(policies.map((p) => [p.personId, p]));
   const recordIds = records.map((row) => row.record.id);
-  const [runs, classifications] = recordIds.length ? await Promise.all([
+  const [runs, classifications, drafts] = recordIds.length ? await Promise.all([
     db.select({ run: crmSequenceRuns, sequence: crmSequences, step: crmSequenceSteps })
       .from(crmSequenceRuns).innerJoin(crmSequences, eq(crmSequences.id, crmSequenceRuns.sequenceId))
       .leftJoin(crmSequenceSteps, and(eq(crmSequenceSteps.sequenceVersionId, crmSequenceRuns.sequenceVersionId), eq(crmSequenceSteps.position, crmSequenceRuns.currentStepPosition)))
       .where(and(inArray(crmSequenceRuns.crmRecordId, recordIds), inArray(crmSequenceRuns.status, ["active", "paused"]))),
     db.select().from(crmClassifications).where(inArray(crmClassifications.crmRecordId, recordIds)).orderBy(desc(crmClassifications.createdAt)),
-  ]) : [[], []];
+    db.select({
+      crmRecordId: crmDrafts.crmRecordId,
+      status: crmDrafts.status,
+      autoSendAt: crmDrafts.autoSendAt,
+      channel: crmDrafts.channel,
+      subject: crmDrafts.subject,
+    }).from(crmDrafts).where(inArray(crmDrafts.crmRecordId, recordIds)).orderBy(desc(crmDrafts.updatedAt)),
+  ]) : [[], [], []];
   const runByRecord = new Map(runs.map((row) => [row.run.crmRecordId, row]));
   const classificationByRecord = new Map<string, (typeof classifications)[number]>();
   for (const item of classifications) if (!classificationByRecord.has(item.crmRecordId)) classificationByRecord.set(item.crmRecordId, item);
+  const draftByRecord = new Map<string, (typeof drafts)[number]>();
+  for (const item of drafts) {
+    const prev = draftByRecord.get(item.crmRecordId);
+    if (!prev || (prev.status === "discarded" && item.status !== "discarded")) {
+      draftByRecord.set(item.crmRecordId, item);
+    }
+  }
   return new Map<string, CrmPeopleProjection>(records.map(({ record, subcategory }) => {
     const run = runByRecord.get(record.id);
     const classification = classificationByRecord.get(record.id);
     const policy = policyByPerson.get(record.personId);
+    const draft = draftByRecord.get(record.id) ?? null;
     return [record.personId, {
       recordId: record.id,
       categoryKey: record.categoryKey,
@@ -701,6 +722,12 @@ export async function crmProjectionForPeople(personIds: string[]): Promise<Map<s
       nextActionAt: record.nextActionAt,
       unacknowledgedAiChange: Boolean(classification && !classification.acknowledgedAt),
       dnc: Boolean(policy?.doNotContact),
+      latestDraft: draft ? {
+        status: draft.status,
+        autoSendAt: draft.autoSendAt,
+        channel: draft.channel,
+        subject: draft.subject,
+      } : null,
       contactPolicy: policy ? {
         doNotContact: policy.doNotContact,
         reason: policy.reason,

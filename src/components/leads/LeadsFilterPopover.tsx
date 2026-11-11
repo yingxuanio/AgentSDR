@@ -59,15 +59,19 @@ export function LeadsFilterPopover({ filters, subcategories, onChange, onClear }
               </Select.Content>
             </Select.Root>
           </Field>
-          <Field label="CRM category">
+          <Field label="CRM stage / category">
             <Select.Root size="small" value={filters.crmCategory} onValueChange={(value) => onChange({ crmCategory: value, crmSubcategoryId: "" })}>
-              <Select.Trigger aria-label="CRM category filter"><Select.Value placeholder="All CRM categories" /></Select.Trigger>
+              <Select.Trigger aria-label="CRM category filter"><Select.Value placeholder="All CRM stages" /></Select.Trigger>
               <Select.Content>
-                <Select.Item value="">All CRM categories</Select.Item>
-                <Select.Item value="customer">Customer</Select.Item>
+                <Select.Item value="">All CRM stages</Select.Item>
+                <Select.Item value="contacted">Contacted (awaiting reply)</Select.Item>
+                <Select.Item value="draft_ready">Draft ready</Select.Item>
+                <Select.Item value="queued">Queued to send</Select.Item>
+                <Select.Item value="new_lead">New lead (uncontacted)</Select.Item>
                 <Select.Item value="interested">Interested</Select.Item>
-                <Select.Item value="not_interested">Not interested</Select.Item>
+                <Select.Item value="customer">Customer</Select.Item>
                 <Select.Item value="other">Other</Select.Item>
+                <Select.Item value="not_interested">Not interested</Select.Item>
               </Select.Content>
             </Select.Root>
           </Field>

@@ -43,7 +43,7 @@ async function listPeople(req: NextRequest) {
     hasLinkedin: req.nextUrl.searchParams.get("hasLinkedin") === "true" ? true : undefined,
     sort: sort === "name" || sort === "title" || sort === "email" || sort === "company" || sort === "updated" || sort === "created" ? sort : undefined,
     direction: direction === "asc" || direction === "desc" ? direction : undefined,
-    crmCategory: crmCategory === "customer" || crmCategory === "interested" || crmCategory === "not_interested" || crmCategory === "other" ? crmCategory : undefined,
+    crmCategory: crmCategory === "customer" || crmCategory === "interested" || crmCategory === "not_interested" || crmCategory === "other" || crmCategory === "contacted" || crmCategory === "draft_ready" || crmCategory === "queued" || crmCategory === "new_lead" ? crmCategory : undefined,
     crmWorkflowState: crmWorkflowState === "unclassified" || crmWorkflowState === "classifying" || crmWorkflowState === "action_required" || crmWorkflowState === "waiting" || crmWorkflowState === "idle" || crmWorkflowState === "paused" || crmWorkflowState === "closed" || crmWorkflowState === "error" ? crmWorkflowState : undefined,
     crmSubcategoryId: req.nextUrl.searchParams.get("crmSubcategoryId") ?? undefined,
     crmAiChange: req.nextUrl.searchParams.get("crmAiChange") === "true" ? true : undefined,

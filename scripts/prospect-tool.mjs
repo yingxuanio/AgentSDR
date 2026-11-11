@@ -8,7 +8,9 @@
  *   node prospect-tool.mjs check "domain1.com" "domain2.com.hk" ...
  *   node prospect-tool.mjs submit /path/to/leads.json
  */
+import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 
 const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY || (() => {
   try {
@@ -23,15 +25,25 @@ const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY || (() => {
 const AGENTSDR_URL = process.env.AGENTSDR_URL || "http://127.0.0.1:13031";
 const AGENTSDR_API_KEY = process.env.AGENTSDR_API_KEY || "agentsdr_test_api_key_for_automation_2026";
 const EVIDENCE_FILE = process.env.PROSPECT_EVIDENCE_FILE || "/tmp/agy-prospect-evidence.ndjson";
+const CLAIMS_DIR = process.env.PROSPECT_CLAIMS_DIR || "";
+const SHARD_ID = process.env.PROSPECT_SHARD_ID || "standalone";
 const DELIVERY_MODE = process.env.OUTREACH_DELIVERY_MODE || "send_paced";
 const PACE_MS = Number(process.env.OUTREACH_PACE_MS ?? 8000);
 
 const DIRECTORY_OR_MEDIA_DOMAINS = new Set([
   "hkmma.org.hk", "fhki.org.hk", "hktdc.com", "cma.org.hk", "hkpc.org", "hkstp.org", "cyberport.hk",
+  "haffa.com.hk", "hkfmp.org.hk", "hketa.org.hk", "hkjewellery.org", "hkplastic.org.hk",
   "taiwantrade.com", "tami.org.tw", "tmdia.org.tw", "twtc.com.tw", "cens.com", "asiannet.com",
   "linkedin.com", "facebook.com", "instagram.com", "youtube.com", "wikipedia.org", "zhihu.com",
   "104.com.tw", "1111.com.tw", "jobsdb.com", "ctgoodjobs.hk", "gov.hk", "gov.tw", "findcompany.com.tw",
   "twincn.com", "opendata.vip", "companydata.hk", "Webb-site.com", "webb-site.com",
+]);
+
+const MULTI_PART_TLDS = new Set([
+  "com.hk", "org.hk", "net.hk", "edu.hk", "gov.hk", "idv.hk",
+  "com.tw", "org.tw", "net.tw", "edu.tw", "gov.tw", "idv.tw",
+  "com.cn", "net.cn", "org.cn", "gov.cn", "com.mo",
+  "co.uk", "org.uk", "co.jp", "com.sg", "com.my", "com.au",
 ]);
 
 function normalizeDomain(raw) {
@@ -40,7 +52,88 @@ function normalizeDomain(raw) {
   if (v.includes("@") && !v.includes("/")) v = v.split("@").pop() || "";
   v = v.replace(/^[a-z]+:\/\//i, "").split("/")[0].split("?")[0].split("#")[0].split(":")[0];
   v = v.replace(/^www\./i, "").replace(/\.+$/, "");
-  return v && v.includes(".") ? v : null;
+  if (!v || !v.includes(".")) return null;
+  const parts = v.split(".");
+  if (parts.length >= 3) {
+    const lastTwo = `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+    if (MULTI_PART_TLDS.has(lastTwo)) {
+      return parts.slice(-3).join(".");
+    }
+    return parts.slice(-2).join(".");
+  }
+  return v;
+}
+
+function claimFilePathForKey(lockKey) {
+  if (!CLAIMS_DIR) return null;
+  const safe = lockKey.replace(/[^a-z0-9._-]+/gi, "_").slice(0, 140);
+  return path.join(CLAIMS_DIR, `${safe}.json`);
+}
+
+function lockKeyForUrlOrDomain(urlOrDomain) {
+  const domain = normalizeDomain(urlOrDomain);
+  if (!domain) return null;
+  if (!DIRECTORY_OR_MEDIA_DOMAINS.has(domain)) {
+    return `domain__${domain}`;
+  }
+  // For directory detail URLs (e.g. hkmma.org.hk/co-detail-en.php?id=88), lock the exact normalized URL
+  if (/^https?:\/\//i.test(urlOrDomain)) {
+    try {
+      const u = new URL(urlOrDomain);
+      if (u.pathname && u.pathname !== "/") {
+        const canonical = `${domain}${u.pathname}${u.search}`.toLowerCase();
+        const hash = crypto.createHash("sha1").update(canonical).digest("hex").slice(0, 16);
+        return `dirurl__${domain}__${hash}`;
+      }
+    } catch {
+      // ignore invalid URL
+    }
+  }
+  return null;
+}
+
+function readClaimOwner(lockKey) {
+  const fp = claimFilePathForKey(lockKey);
+  if (!fp || !fs.existsSync(fp)) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(fp, "utf8"));
+    return data?.shard || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Atomically claims a company root domain (or directory detail URL) for SHARD_ID using O_CREAT | O_EXCL ("wx").
+ * Re-entrant for the same SHARD_ID (so scraping / + /about + /contact of the same company succeeds),
+ * while immediately blocking other concurrent shards from wasting Firecrawl scrapes on the same company.
+ */
+function tryAcquireClaim(urlOrDomain) {
+  if (!CLAIMS_DIR) return { allowed: true, owner: SHARD_ID };
+  const lockKey = lockKeyForUrlOrDomain(urlOrDomain);
+  if (!lockKey) return { allowed: true, owner: SHARD_ID };
+  const fp = claimFilePathForKey(lockKey);
+  if (!fp) return { allowed: true, owner: SHARD_ID };
+
+  try {
+    fs.mkdirSync(CLAIMS_DIR, { recursive: true });
+    const fd = fs.openSync(fp, "wx");
+    try {
+      fs.writeFileSync(fd, JSON.stringify({ shard: SHARD_ID, key: lockKey, ref: urlOrDomain, ts: Date.now() }));
+    } finally {
+      fs.closeSync(fd);
+    }
+    return { allowed: true, owner: SHARD_ID };
+  } catch (err) {
+    if (err?.code === "EEXIST") {
+      const owner = readClaimOwner(lockKey);
+      if (!owner || owner === SHARD_ID) {
+        return { allowed: true, owner: owner || SHARD_ID };
+      }
+      return { allowed: false, owner };
+    }
+    return { allowed: true, owner: SHARD_ID };
+  }
 }
 
 function extractEmails(text) {
@@ -150,7 +243,7 @@ async function fetchFirecrawlWithRetry(endpoint, payload, timeoutMs = 15000) {
 
 async function searchOne(query) {
   try {
-    const { data } = await fetchFirecrawlWithRetry("search", { query, limit: 6 }, 15000);
+    const { data } = await fetchFirecrawlWithRetry("search", { query, limit: 8 }, 15000);
     const hits = (data?.data ?? []).map((r) => {
       const text = `${r.title ?? ""} ${r.description ?? ""}`;
       const emails = extractEmails(text);
@@ -170,6 +263,15 @@ async function searchOne(query) {
 }
 
 async function scrapeOne(url) {
+  const claim = tryAcquireClaim(url);
+  if (!claim.allowed) {
+    return {
+      url,
+      ok: false,
+      skippedClaimedByShard: claim.owner,
+      error: `Skipped: already claimed in-flight by parallel shard "${claim.owner}"`,
+    };
+  }
   try {
     const { data } = await fetchFirecrawlWithRetry(
       "scrape",
@@ -249,15 +351,30 @@ if (cmd === "search") {
   }
   const crmCheck = await checkDomainsInCrm(candidateDomains);
   const matchedSet = new Set(crmCheck.matchedDomains ?? []);
+
   for (const g of groups) {
+    const freshHits = [];
+    const skipped = [];
     for (const h of g.hits) {
       if (!h.domain) continue;
+      const lockKey = lockKeyForUrlOrDomain(h.url || h.domain);
+      const claimOwner = lockKey ? readClaimOwner(lockKey) : null;
+      if (claimOwner && claimOwner !== SHARD_ID) {
+        skipped.push(`${h.domain} (claimed:${claimOwner})`);
+        continue;
+      }
       if (DIRECTORY_OR_MEDIA_DOMAINS.has(h.domain)) {
         h.type = "directory_or_platform";
+        freshHits.push(h);
+      } else if (matchedSet.has(h.domain)) {
+        skipped.push(`${h.domain} (alreadyInCrm)`);
       } else {
-        h.alreadyInCrm = matchedSet.has(h.domain);
+        h.alreadyInCrm = false;
+        freshHits.push(h);
       }
     }
+    g.hits = freshHits;
+    if (skipped.length > 0) g.skipped = skipped;
   }
   console.log(JSON.stringify({ nextCodes: crmCheck.nextCodes, searches: groups }, null, 2));
 } else if (cmd === "scrape") {
@@ -268,8 +385,16 @@ if (cmd === "search") {
   const out = await Promise.all(args.map(scrapeOne));
   console.log(JSON.stringify(out, null, 2));
 } else if (cmd === "check") {
-  const out = await checkDomainsInCrm(args);
-  console.log(JSON.stringify(out, null, 2));
+  const out = await checkDomainsInCrm(args.map(normalizeDomain).filter(Boolean));
+  const claimedByOtherShards = [];
+  for (const raw of args) {
+    const lockKey = lockKeyForUrlOrDomain(raw);
+    const owner = lockKey ? readClaimOwner(lockKey) : null;
+    if (owner && owner !== SHARD_ID) {
+      claimedByOtherShards.push({ ref: raw, domain: normalizeDomain(raw), owner });
+    }
+  }
+  console.log(JSON.stringify({ ...out, claimedByOtherShards }, null, 2));
 } else if (cmd === "submit") {
   const arg = args[0];
   if (!arg) {
@@ -289,11 +414,24 @@ if (cmd === "search") {
   let evidence = loadEvidence();
   const validLeads = [];
   const provenanceRejected = [];
+  const localClaimSkipped = [];
 
   for (const lead of leads) {
     const email = (lead.email ?? "").trim().toLowerCase();
     if (!email) {
       provenanceRejected.push({ companyName: lead.companyName, email, error: "Empty email" });
+      continue;
+    }
+    const domainClaim = tryAcquireClaim(lead.companyDomain || email);
+    if (!domainClaim.allowed) {
+      localClaimSkipped.push({
+        ok: false,
+        status: "skipped_duplicate",
+        companyName: lead.companyName,
+        companyDomain: lead.companyDomain,
+        email,
+        error: `Domain already claimed in-flight by parallel shard "${domainClaim.owner}"`,
+      });
       continue;
     }
     if (!evidence.emails[email]) {
@@ -345,10 +483,10 @@ if (cmd === "search") {
     sent: apiSummary.sent ?? 0,
     queued: apiSummary.queued ?? 0,
     awaitingReview: apiSummary.awaitingReview ?? 0,
-    skippedDuplicate: apiSummary.skippedDuplicate ?? 0,
+    skippedDuplicate: (apiSummary.skippedDuplicate ?? 0) + localClaimSkipped.length,
     rejected: (apiSummary.rejected ?? 0) + provenanceRejected.length,
     failed: apiSummary.failed ?? 0,
-    results: [...provenanceRejected, ...(apiSummary.results ?? [])],
+    results: [...localClaimSkipped, ...provenanceRejected, ...(apiSummary.results ?? [])],
   };
   console.log(JSON.stringify(combined, null, 2));
 } else {

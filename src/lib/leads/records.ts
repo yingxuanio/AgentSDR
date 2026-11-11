@@ -6,7 +6,7 @@ import { campaigns as linkedinCampaigns, leads as linkedinLeads } from "@/lib/li
 import { inferCompanyDomainFromEmail, normalizeCompanyDomain, normalizeEmail, normalizeLinkedinSlug } from "./identity";
 import { personProfile } from "./variables";
 import { crmProjectionForPeople } from "@/lib/crm/queries";
-import { crmClassifications, crmPersonContactPolicies, crmRecords } from "@/lib/crm/schema";
+import { crmClassifications, crmDrafts, crmPersonContactPolicies, crmRecords } from "@/lib/crm/schema";
 import { currentOrganizationId, inOrg } from "@/lib/tenancy/scope";
 
 export type LeadTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -384,7 +384,7 @@ export type PersonListInput = {
   closed?: boolean;
   sort?: "name" | "title" | "email" | "company" | "updated" | "created";
   direction?: "asc" | "desc";
-  crmCategory?: "customer" | "interested" | "not_interested" | "other";
+  crmCategory?: "customer" | "interested" | "not_interested" | "other" | "contacted" | "draft_ready" | "queued" | "new_lead";
   crmWorkflowState?: "unclassified" | "classifying" | "action_required" | "waiting" | "idle" | "paused" | "closed" | "error";
   crmSubcategoryId?: string;
   crmAiChange?: boolean;
@@ -443,7 +443,68 @@ export async function listPeoplePage(input: PersonListInput = {}) {
           sql`not exists (select 1 from "Lead" where "personId" = ${people.id})`,
         )
       : undefined,
-    input.crmCategory ? exists(db.select({ id: crmRecords.id }).from(crmRecords).where(and(eq(crmRecords.personId, people.id), eq(crmRecords.categoryKey, input.crmCategory)))) : undefined,
+    input.crmCategory
+      ? input.crmCategory === "contacted"
+        ? exists(
+            db.select({ id: crmRecords.id }).from(crmRecords).where(
+              and(
+                eq(crmRecords.personId, people.id),
+                sql`${crmRecords.categoryKey} is null`,
+                sql`${crmRecords.lastOutboundAt} is not null`,
+                sql`${crmRecords.lastInboundAt} is null`,
+                sql`${crmRecords.workflowState} not in ('closed', 'error')`,
+              ),
+            ),
+          )
+        : input.crmCategory === "queued"
+          ? exists(
+              db.select({ id: crmRecords.id })
+                .from(crmRecords)
+                .innerJoin(crmDrafts, eq(crmDrafts.crmRecordId, crmRecords.id))
+                .where(
+                  and(
+                    eq(crmRecords.personId, people.id),
+                    sql`${crmRecords.categoryKey} is null`,
+                    eq(crmDrafts.status, "awaiting_review"),
+                    sql`${crmDrafts.autoSendAt} is not null`,
+                  ),
+                ),
+            )
+          : input.crmCategory === "draft_ready"
+            ? exists(
+                db.select({ id: crmRecords.id }).from(crmRecords).where(
+                  and(
+                    eq(crmRecords.personId, people.id),
+                    sql`${crmRecords.categoryKey} is null`,
+                    or(
+                      eq(crmRecords.workflowState, "action_required"),
+                      exists(
+                        db.select({ id: crmDrafts.id }).from(crmDrafts).where(
+                          and(
+                            eq(crmDrafts.crmRecordId, crmRecords.id),
+                            eq(crmDrafts.status, "awaiting_review"),
+                            sql`${crmDrafts.autoSendAt} is null`,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              )
+            : input.crmCategory === "new_lead"
+              ? exists(
+                  db.select({ id: crmRecords.id }).from(crmRecords).where(
+                    and(
+                      eq(crmRecords.personId, people.id),
+                      sql`${crmRecords.categoryKey} is null`,
+                      sql`${crmRecords.lastOutboundAt} is null`,
+                      sql`${crmRecords.lastInboundAt} is null`,
+                      sql`${crmRecords.workflowState} not in ('action_required', 'closed', 'error')`,
+                    ),
+                  ),
+                )
+              : exists(db.select({ id: crmRecords.id }).from(crmRecords).where(and(eq(crmRecords.personId, people.id), eq(crmRecords.categoryKey, input.crmCategory))))
+      : undefined,
     input.crmWorkflowState ? exists(db.select({ id: crmRecords.id }).from(crmRecords).where(and(eq(crmRecords.personId, people.id), eq(crmRecords.workflowState, input.crmWorkflowState)))) : undefined,
     input.crmSubcategoryId ? exists(db.select({ id: crmRecords.id }).from(crmRecords).where(and(eq(crmRecords.personId, people.id), eq(crmRecords.subcategoryId, input.crmSubcategoryId)))) : undefined,
     input.crmAiChange === true ? exists(
