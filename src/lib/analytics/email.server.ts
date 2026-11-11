@@ -143,7 +143,7 @@ export async function getEmailAnalytics(range: AnalyticsRange): Promise<EmailAna
             JOIN crm_records r ON r.id = d.crm_record_id
             WHERE r.organization_id = ${org}
               AND d.channel = 'email'
-              AND sa.status IN ('failed', 'delivery_uncertain')
+              AND (sa.status IN ('failed', 'delivery_uncertain') OR (sa.status = 'reconciled' AND sa.provider_message_id IS NULL))
               AND ${inRange(sql`sa.created_at`, range)}
           ) t
           GROUP BY GROUPING SETS ((), (d))
@@ -177,7 +177,7 @@ export async function getEmailAnalytics(range: AnalyticsRange): Promise<EmailAna
             JOIN people p ON p.id = r.person_id
             WHERE r.organization_id = ${org}
               AND d.channel = 'email'
-              AND sa.status IN ('failed', 'delivery_uncertain')
+              AND (sa.status IN ('failed', 'delivery_uncertain') OR (sa.status = 'reconciled' AND sa.provider_message_id IS NULL))
               AND coalesce(sa.error, '') ~* '(55[0-9]|5\\.[0-9]\\.[0-9]|rejected|does not exist|doesn''t exist|bounced|user unknown)'
               AND ${inCurrentOrPreviousRange(sql`sa.created_at`, range)}
           )
@@ -216,7 +216,7 @@ export async function getEmailAnalytics(range: AnalyticsRange): Promise<EmailAna
               JOIN crm_records r2 ON r2.id = d2.crm_record_id
               WHERE r2.organization_id = ${org}
                 AND d2.channel = 'email'
-                AND sa2.status IN ('failed', 'delivery_uncertain')
+                AND (sa2.status IN ('failed', 'delivery_uncertain') OR (sa2.status = 'reconciled' AND sa2.provider_message_id IS NULL))
                 AND coalesce(sa2.error, '') ~* '(55[0-9]|5\\.[0-9]\\.[0-9]|rejected|does not exist|doesn''t exist|bounced|user unknown)'
             ) AS bounced
           FROM crm_records r
