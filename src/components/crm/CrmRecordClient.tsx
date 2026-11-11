@@ -57,7 +57,7 @@ import {
 } from "./CrmLayout";
 import { RecordBody } from "./CrmSkeletons";
 import { asList, asObject, crmFetch, displayName, errorMessage, extractLeadContext, formatDate, relativeDate } from "./crm-utils";
-import { ClassificationPicker, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, humanize } from "./ActionRowTools";
+import { ClassificationPicker, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, SendDraftButton, humanize } from "./ActionRowTools";
 import { ContactAvatar } from "./ContactAvatar";
 import { takeRecordWorkspace } from "./recordPrefetch";
 import { announceRecordChanged } from "./recordEvents";
@@ -656,8 +656,8 @@ function ReplyComposer({ record, draft, conversations, citations, uncertainAttem
         {editingCurrentDraft && draft.status === "failed" && <InlineWarning tone="danger" title="The draft could not be written" detail={text(draft.error, "Regenerate it, or write the reply yourself.")} />}
         {editingCurrentDraft && draft.status === "awaiting_review" && Boolean(draft.autoSendAt) && (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg bg-information-lighter p-3 ring-1 ring-inset ring-information-light">
-            <Badge.Root variant="lighter" size="medium" color="blue" className="shrink-0 whitespace-nowrap"><Badge.Dot />Sends automatically</Badge.Root>
-            <p className="min-w-0 flex-1 text-paragraph-xs text-information-dark">Goes out on its own when its account&apos;s next slot opens: one follow-up per account every 30 minutes by default (Sending rules), inside sending hours.</p>
+            <Badge.Root variant="lighter" size="medium" color="blue" className="shrink-0 whitespace-nowrap"><Badge.Dot />{draft.sequenceStepRunId ? "Sends automatically" : "Queued in working hours"}</Badge.Root>
+            <p className="min-w-0 flex-1 text-paragraph-xs text-information-dark">Goes out automatically when its account&apos;s next weekday slot opens (paced by Sending rules inside working hours).</p>
             <button type="button" className={cn(secondaryButtonClass, "h-7 whitespace-nowrap px-2.5 text-label-xs")} onClick={() => void onAction(`/drafts/${String(draft.id)}/review`, {}, "POST", "Moved to Action required")}>Review before sending</button>
           </div>
         )}
@@ -704,7 +704,11 @@ function ReplyComposer({ record, draft, conversations, citations, uncertainAttem
               {editingCurrentDraft ? <>
                 <RegenerateDraftDialog open={regenerateOpen} onOpenChange={setRegenerateOpen} onSubmit={(feedback) => onAction(`/drafts/${String(draft.id)}/regenerate`, { feedback }, "POST", "Draft rewritten with your notes")} />
                 <button type="button" disabled={!ready} className={secondaryButtonClass} onClick={() => void onAction(`/drafts/${String(draft.id)}`, { subject: requestSubject, body, revision }, "PATCH", "Draft saved")}><RiSaveLine className="size-4" aria-hidden="true" />Save</button>
-                <button type="button" disabled={!ready} className={primaryButtonClass} onClick={() => void onAction(`/drafts/${String(draft.id)}/send`, { subject: requestSubject, body, revision }, "POST", "Reply queued for sending")}><RiSendPlaneLine className="size-4" aria-hidden="true" />Approve &amp; send</button>
+                <SendDraftButton
+                  disabled={!ready}
+                  onSendNow={() => void onAction(`/drafts/${String(draft.id)}/send`, { subject: requestSubject, body, revision }, "POST", "Message sent")}
+                  onQueueInWorkingHours={() => void onAction(`/drafts/${String(draft.id)}/send`, { subject: requestSubject, body, revision, scheduleInWorkingHours: true }, "POST", "Queued for working hours")}
+                />
               </> : <button type="button" disabled={!ready} className={primaryButtonClass} onClick={() => void onAction(`/records/${String(record.id)}/draft`, { conversationId, subject: requestSubject, bodyText: body, bodyHtml: null }, "POST", "Draft created and ready for review")}><RiSaveLine className="size-4" aria-hidden="true" />Create draft</button>}
             </div>
           </div>

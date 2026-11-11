@@ -56,7 +56,7 @@ import { cn } from "@/utils/cn";
 import { ContactAvatar } from "./ContactAvatar";
 import { ErrorState, primaryButtonClass, secondaryButtonClass } from "./CrmLayout";
 import { RowsSkeleton } from "./CrmSkeletons";
-import { CategoryDot, ClassificationPicker, HoverPreview, HoverPreviewProvider, InlineDraftEditor, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, humanize, type MoveStageBody, type RowMutation } from "./ActionRowTools";
+import { CategoryDot, ClassificationPicker, HoverPreview, HoverPreviewProvider, InlineDraftEditor, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, SendDraftButton, humanize, type MoveStageBody, type RowMutation } from "./ActionRowTools";
 import { asList, asObject, CATEGORY_LABELS, crmFetch, displayName, errorMessage, extractLeadContext, formatDate, relativeDate, timeAgo } from "./crm-utils";
 import { prefetchRecordWorkspace } from "./recordPrefetch";
 import { useRecordChanged } from "./recordEvents";
@@ -863,10 +863,18 @@ function DueChip({ row, align = "end" }: { row: Row; align?: "start" | "end" }) 
   </div>;
 }
 
-function sendDraft(row: Row, onMutate: RowMutation) {
+function sendDraft(row: Row, onMutate: RowMutation, scheduleInWorkingHours = false) {
   const editable = row.editable;
   if (!editable) return;
-  void onMutate(`/drafts/${String(editable.id)}/send`, { revision: Number(editable.revision ?? 1) }, "POST", "Reply queued for sending");
+  const payload = scheduleInWorkingHours
+    ? { revision: Number(editable.revision ?? 1), scheduleInWorkingHours: true }
+    : { revision: Number(editable.revision ?? 1) };
+  void onMutate(
+    `/drafts/${String(editable.id)}/send`,
+    payload,
+    "POST",
+    scheduleInWorkingHours ? "Queued for working hours" : "Message sent",
+  );
 }
 
 function ActionRow({ action, categories, busy, editing, pipeline, now, onOpen, onToggleEdit, onMutate, onClassify }: {
@@ -942,14 +950,27 @@ function ActionRow({ action, categories, busy, editing, pipeline, now, onOpen, o
           onActivate={editable ? onToggleEdit : undefined}
           actions={editable && <>
             <button type="button" className={cn(secondaryButtonClass, "h-8")} onClick={onToggleEdit}><RiPencilLine className="size-4" aria-hidden="true" />{editing ? "Close editor" : "Edit"}</button>
-            <button type="button" className={cn(primaryButtonClass, "h-8")} disabled={!sendable} onClick={() => sendDraft(row, onMutate)} title={sendTitle}><RiSendPlaneLine className="size-4" aria-hidden="true" />Send</button>
+            <SendDraftButton
+              size="sm"
+              disabled={!sendable}
+              title={sendTitle}
+              onSendNow={() => sendDraft(row, onMutate, false)}
+              onQueueInWorkingHours={() => sendDraft(row, onMutate, true)}
+            />
           </>}
         >
           <DraftSummary row={row} />
         </HoverPreview>
-        {editable && !editing && <div data-row-tools className="pointer-events-none absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1 rounded-lg bg-bg-white-0 p-1 opacity-0 shadow-regular-md ring-1 ring-inset ring-stroke-soft-200 transition-opacity group-hover/row:pointer-events-auto group-hover/row:opacity-100 group-focus-within/row:pointer-events-auto group-focus-within/row:opacity-100">
+        {editable && !editing && <div data-row-tools className="pointer-events-none absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1 rounded-lg bg-bg-white-0 p-1 opacity-0 shadow-regular-md ring-1 ring-inset ring-stroke-soft-200 transition-opacity group-hover/row:pointer-events-auto group-hover/row:opacity-100 group-focus-within/row:pointer-events-auto group-focus-within/row:opacity-100 has-[[data-state=open]]:pointer-events-auto has-[[data-state=open]]:opacity-100">
           <Button.Root variant="neutral" mode="ghost" size="xxsmall" onClick={onToggleEdit} aria-label={`Edit the draft to ${row.name}`} title="Edit the draft here"><Button.Icon as={RiPencilLine} /></Button.Root>
-          <Button.Root variant="primary" mode="filled" size="xxsmall" disabled={!sendable} onClick={() => sendDraft(row, onMutate)} aria-label={`Send the draft to ${row.name}`} title={sendTitle}><Button.Icon as={RiSendPlaneFill} />Send</Button.Root>
+          <SendDraftButton
+            size="xs"
+            disabled={!sendable}
+            title={sendTitle}
+            ariaLabel={`Send the draft to ${row.name} now`}
+            onSendNow={() => sendDraft(row, onMutate, false)}
+            onQueueInWorkingHours={() => sendDraft(row, onMutate, true)}
+          />
         </div>}
       </Table.Cell>
       <Table.Cell className="px-3 py-3 text-right">

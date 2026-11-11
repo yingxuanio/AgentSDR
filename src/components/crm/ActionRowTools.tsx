@@ -264,7 +264,11 @@ export function HoverPreview({ title, body, meta, children, className, onActivat
             {meta && <p className="shrink-0 text-paragraph-xs text-text-soft-400">{meta}</p>}
           </div>}
           <p className="max-h-72 overflow-y-auto whitespace-pre-wrap text-paragraph-sm leading-6 text-text-sub-600">{body}</p>
-          {actions && <div className="mt-3 flex items-center gap-2 border-t border-stroke-soft-200 pt-3" onClick={(event) => { event.stopPropagation(); setOpen(false); }}>{actions}</div>}
+          {actions && <div className="mt-3 flex items-center gap-2 border-t border-stroke-soft-200 pt-3" onClick={(event) => {
+            event.stopPropagation();
+            if ((event.target as HTMLElement).closest("[data-keep-preview], [aria-haspopup='menu']")) return;
+            setOpen(false);
+          }}>{actions}</div>}
         </Tooltip.Content>
       </Tooltip.Portal>
     </Tooltip.Root>
@@ -508,9 +512,80 @@ export function MoveStageDialog({ categories, categoryKey, subcategoryId, contex
 }
 
 /**
+ * Split send button: primary action sends immediately ("Send now"), while the
+ * chevron opens a dropdown to queue the draft in the account's weekday working
+ * window ("Queue in working hours").
+ */
+export function SendDraftButton({
+  disabled,
+  size = "md",
+  label = "Send now",
+  title,
+  ariaLabel,
+  onSendNow,
+  onQueueInWorkingHours,
+}: {
+  disabled?: boolean;
+  size?: "md" | "sm" | "xs";
+  label?: string;
+  title?: string;
+  ariaLabel?: string;
+  onSendNow: () => void;
+  onQueueInWorkingHours: () => void;
+}) {
+  const heightClass = size === "xs" ? "h-7 text-label-xs" : size === "sm" ? "h-8 text-label-sm" : "h-9 text-label-sm";
+  const mainPadClass = size === "xs" ? "gap-1.5 px-2.5" : "gap-2 px-3";
+  const triggerPadClass = size === "xs" ? "px-1.5" : "px-2";
+  const iconSizeClass = size === "xs" ? "size-3.5" : "size-4";
+  const sharedInteractive =
+    "inline-flex items-center justify-center bg-primary-base text-static-white transition hover:bg-primary-darker focus-visible:z-10 focus-visible:outline-none focus-visible:shadow-button-primary-focus disabled:pointer-events-none disabled:bg-bg-weak-50 disabled:text-text-disabled-300";
+
+  return (
+    <div className="inline-flex shrink-0 items-stretch" data-keep-preview onClick={(event) => event.stopPropagation()}>
+      <button
+        type="button"
+        disabled={disabled}
+        title={title ?? "Send immediately"}
+        aria-label={ariaLabel}
+        onClick={onSendNow}
+        className={cn(sharedInteractive, heightClass, mainPadClass, "rounded-l-lg")}
+      >
+        <RiSendPlaneLine className={iconSizeClass} aria-hidden="true" />
+        <span>{label}</span>
+      </button>
+      <Dropdown.Root>
+        <Dropdown.Trigger asChild>
+          <button
+            type="button"
+            disabled={disabled}
+            data-keep-preview
+            title="More send options"
+            aria-label="Send options"
+            className={cn(
+              sharedInteractive,
+              heightClass,
+              triggerPadClass,
+              "rounded-r-lg border-l border-white/25 disabled:border-stroke-soft-200",
+            )}
+          >
+            <RiArrowDownSLine className={iconSizeClass} aria-hidden="true" />
+          </button>
+        </Dropdown.Trigger>
+        <Dropdown.Content align="end" onClick={(event) => event.stopPropagation()}>
+          <Dropdown.Item onSelect={onQueueInWorkingHours}>
+            <Dropdown.ItemIcon as={RiTimerLine} className="text-text-sub-600" />
+            <span>Queue in working hours</span>
+          </Dropdown.Item>
+        </Dropdown.Content>
+      </Dropdown.Root>
+    </div>
+  );
+}
+
+/**
  * The reply composer, trimmed to what an inline row needs: the message being
  * answered on one side, the editable draft on the other, and the same
- * Approve & send / Save / Regenerate / Discard set the record page has.
+ * Send now / Save / Regenerate / Discard set the record page has.
  */
 export function InlineDraftEditor({ action, onMutate, onClose, busy }: { action: Data; onMutate: RowMutation; onClose: () => void; busy: boolean }) {
   const record = asObject(action.record);
@@ -563,9 +638,11 @@ export function InlineDraftEditor({ action, onMutate, onClose, busy }: { action:
           disabled={busy}
         />
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" disabled={!ready} className={primaryButtonClass} onClick={() => void onMutate(`/drafts/${draftId}/send`, payload, "POST", "Reply queued for sending")}>
-            <RiSendPlaneLine className="size-4" aria-hidden="true" />{dirty ? "Save & send" : "Approve & send"}
-          </button>
+          <SendDraftButton
+            disabled={!ready}
+            onSendNow={() => void onMutate(`/drafts/${draftId}/send`, payload, "POST", "Message sent")}
+            onQueueInWorkingHours={() => void onMutate(`/drafts/${draftId}/send`, { ...payload, scheduleInWorkingHours: true }, "POST", "Queued for working hours")}
+          />
           <button type="button" disabled={!draftId || !dirty || busy || !body.trim()} className={secondaryButtonClass} onClick={() => void onMutate(`/drafts/${draftId}`, payload, "PATCH", "Draft saved")}>
             <RiSaveLine className="size-4" aria-hidden="true" />Save
           </button>

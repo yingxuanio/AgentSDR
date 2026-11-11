@@ -69,65 +69,91 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
       const scheduleInWorkingHours = Boolean(value.scheduleInWorkingHours);
       if (scheduleInWorkingHours) {
+        if (draftScope.draft.status !== "awaiting_review") {
+          throw new CrmRequestError(
+            `Only awaiting_review drafts can be queued (current status: ${draftScope.draft.status})`,
+            409,
+            "DRAFT_NOT_SENDABLE",
+          );
+        }
+        if (draftScope.record.contextVersion !== (edited?.expectedContextVersion ?? draftScope.draft.expectedContextVersion)) {
+          throw new CrmRequestError(
+            "Draft context is out of date; regenerate or review before queuing",
+            409,
+            "STALE_DRAFT_CONTEXT",
+          );
+        }
+
         let mailboxHours: WorkingHours | null = null;
-        if (draftScope.draft.channel === "email" && draftScope.conversation?.accountRef) {
-          const [mailbox] = await db
-            .select({ workingHours: mailboxes.workingHours })
-            .from(mailboxes)
-            .where(and(inOrg(mailboxes), eq(mailboxes.emailAddress, draftScope.conversation.accountRef)))
-            .limit(1);
-          if (mailbox?.workingHours) {
-            mailboxHours = mailbox.workingHours;
-          } else {
-            const { sendingHours } = await channelRules("email");
-            mailboxHours = mailboxHoursFromWeekly(sendingHours);
+        if (draftScope.draft.channel === "email") {
+          if (draftScope.conversation?.accountRef) {
+            const [mailbox] = await db
+              .select({ workingHours: mailboxes.workingHours })
+              .from(mailboxes)
+              .where(and(inOrg(mailboxes), eq(mailboxes.emailAddress, draftScope.conversation.accountRef)))
+              .limit(1);
+            if (mailbox?.workingHours) {
+              mailboxHours = mailbox.workingHours;
+            }
           }
+          if (!mailboxHours) {
+            const { sendingHours } = await channelRules("email");
+            if (sendingHours) mailboxHours = mailboxHoursFromWeekly(sendingHours);
+          }
+        } else if (draftScope.draft.channel === "whatsapp") {
+          const { sendingHours } = await channelRules("whatsapp");
+          if (sendingHours) mailboxHours = mailboxHoursFromWeekly(sendingHours);
+        } else if (draftScope.draft.channel === "linkedin") {
+          const { workingHours } = await channelRules("linkedin");
+          if (workingHours) mailboxHours = mailboxHoursFromWeekly(workingHours);
         }
 
         const now = new Date();
-        if (mailboxHours && !isWithinWorkingHours(mailboxHours, now)) {
-          const scheduledAt = nextWorkingWindowStart(mailboxHours, now);
-          await withCrmTransaction(async (tx) => {
-            await tx
-              .update(crmDrafts)
-              .set({ autoSendAt: scheduledAt, updatedAt: now })
-              .where(eq(crmDrafts.id, draftId));
+        const scheduledAt =
+          mailboxHours && !isWithinWorkingHours(mailboxHours, now)
+            ? nextWorkingWindowStart(mailboxHours, now)
+            : now;
 
-            await tx
-              .update(crmRecords)
-              .set({ workflowState: "waiting", nextActionAt: null, updatedAt: now })
-              .where(eq(crmRecords.id, draftScope.record.id));
+        await withCrmTransaction(async (tx) => {
+          await tx
+            .update(crmDrafts)
+            .set({ autoSendAt: scheduledAt, updatedAt: now })
+            .where(eq(crmDrafts.id, draftId));
 
-            await appendCrmEvent(tx, {
-              personId: draftScope.record.personId,
-              crmRecordId: draftScope.record.id,
-              pipelineId: draftScope.record.pipelineId,
-              eventType: "draft.auto_send_queued",
-              actorType: "authenticated_operator",
-              actorRef: ctx.userName,
-              toData: {
-                draftId,
-                autoSendAt: scheduledAt.toISOString(),
-                workflowState: "waiting",
-                reason: "scheduled_in_working_hours",
-              },
-              contextVersion: draftScope.record.contextVersion,
-            });
-          });
+          await tx
+            .update(crmRecords)
+            .set({ workflowState: "waiting", nextActionAt: null, updatedAt: now })
+            .where(eq(crmRecords.id, draftScope.record.id));
 
-          return Response.json({
-            scheduled: true,
-            sent: false,
-            scheduledAt: scheduledAt.toISOString(),
-            draft: {
-              id: draftId,
-              revision: edited?.revision ?? originalRevision,
-              status: "awaiting_review",
+          await appendCrmEvent(tx, {
+            personId: draftScope.record.personId,
+            crmRecordId: draftScope.record.id,
+            pipelineId: draftScope.record.pipelineId,
+            eventType: "draft.auto_send_queued",
+            actorType: "authenticated_operator",
+            actorRef: ctx.userName,
+            toData: {
+              draftId,
               autoSendAt: scheduledAt.toISOString(),
               workflowState: "waiting",
+              reason: "scheduled_in_working_hours",
             },
+            contextVersion: draftScope.record.contextVersion,
           });
-        }
+        });
+
+        return Response.json({
+          scheduled: true,
+          sent: false,
+          scheduledAt: scheduledAt.toISOString(),
+          draft: {
+            id: draftId,
+            revision: edited?.revision ?? originalRevision,
+            status: "awaiting_review",
+            autoSendAt: scheduledAt.toISOString(),
+            workflowState: "waiting",
+          },
+        });
       }
 
       const rawKey =
