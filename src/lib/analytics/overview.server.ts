@@ -13,7 +13,7 @@ import {
   type OverviewAnalytics,
 } from "./contract";
 import { getCrmSummary, runQueries, STAGE_CHANGE_EVENTS } from "./crm.server";
-import { createLimiter, inCurrentOrPreviousRange, inRange, num } from "./server";
+import { createLimiter, inCurrentOrPreviousRange, inRange, isHumanInboundMessageSql, num } from "./server";
 
 /**
  * The Overview: the CRM summary plus the outreach funnel and channel table.
@@ -87,6 +87,7 @@ export async function getOverviewAnalytics(range: AnalyticsRange): Promise<Overv
           FROM crm_conversation_messages m
           WHERE m.direction = 'inbound' AND ${inCurrentOrPreviousRange(sql`m.sent_at`, range)}
             AND m.conversation_id IN (SELECT id FROM crm_conversations WHERE organization_id = ${org})
+            AND ${isHumanInboundMessageSql()}
           GROUP BY GROUPING SETS ((1), (1, 2))`),
       () =>
         // Judgement calls: "positive"/"customer" look at the category a record

@@ -11,7 +11,7 @@ import {
   type AnalyticsRange,
   type EmailAnalytics,
 } from "./contract";
-import { inCurrentOrPreviousRange, inPreviousRange, inRange, localDay, num, runLimited } from "./server";
+import { inCurrentOrPreviousRange, inPreviousRange, inRange, isHumanInboundMessageSql, localDay, num, runLimited } from "./server";
 
 const CAMPAIGN_ROW_CAP = 25;
 
@@ -160,6 +160,7 @@ export async function getEmailAnalytics(range: AnalyticsRange): Promise<EmailAna
             WHERE m.direction = 'inbound' AND m.channel = 'email'
               AND ${inCurrentOrPreviousRange(sql`m.sent_at`, range)}
               AND m.conversation_id IN (SELECT id FROM crm_conversations WHERE organization_id = ${org})
+              AND ${isHumanInboundMessageSql()}
           ) t
           GROUP BY GROUPING SETS ((), (d))
         `),
@@ -208,7 +209,18 @@ export async function getEmailAnalytics(range: AnalyticsRange): Promise<EmailAna
             'active'::text AS status,
             count(DISTINCT r.person_id)::int AS leads,
             count(DISTINCT r.person_id) FILTER (WHERE r.last_outbound_at IS NOT NULL)::int AS contacted,
-            count(DISTINCT r.person_id) FILTER (WHERE r.last_inbound_at IS NOT NULL)::int AS replied,
+            count(DISTINCT r.person_id) FILTER (
+              WHERE EXISTS (
+                SELECT 1
+                FROM crm_conversation_messages m
+                JOIN crm_conversations cv_r ON cv_r.id = m.conversation_id
+                WHERE cv_r.crm_record_id = r.id
+                  AND cv_r.organization_id = ${org}
+                  AND m.channel = 'email'
+                  AND m.direction = 'inbound'
+                  AND ${isHumanInboundMessageSql()}
+              )
+            )::int AS replied,
             (
               SELECT count(DISTINCT r2.person_id)::int
               FROM crm_records r2

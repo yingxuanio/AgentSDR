@@ -100,5 +100,6 @@ describe("smtpImap MIME and RFC 5322 parser", () => {
     expect(parsedAutoReply?.fromEmail).toBe("debbie@alphalogisticshk.com");
     expect(parsedAutoReply?.threadId).toBe("<68877b8d-8981-4ab6-ba77-15f6680f7538@linktion.cn>");
     expect(parsedAutoReply?.bodyText).toContain("no longer with Alpha Logistics HK Ltd.");
+    expect(parsedAutoReply?.isAutoReply).toBe(true);
   });
 });

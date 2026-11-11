@@ -993,6 +993,18 @@ export function parseRawEmailMessage(
   const toAddresses = parseAddressHeader(toRaw);
   const ccAddresses = parseAddressHeader(ccRaw);
   const replyToAddresses = parseAddressHeader(replyToRaw);
+  const autoSubmitted = (headers.get("auto-submitted") ?? "").trim().toLowerCase();
+  const xAutoreply = (headers.get("x-autoreply") ?? "").trim().toLowerCase();
+  const xAutorespond = (headers.get("x-autorespond") ?? "").trim();
+  const precedence = (headers.get("precedence") ?? "").trim().toLowerCase();
+  const isAutoReply =
+    Boolean(autoSubmitted && autoSubmitted !== "no") ||
+    xAutoreply === "yes" ||
+    xAutoreply === "true" ||
+    xAutoreply === "1" ||
+    Boolean(xAutorespond) ||
+    precedence === "auto_reply" ||
+    precedence === "junk";
 
   return {
     gmailMessageId: `imap-${context.uid}`,
@@ -1009,6 +1021,7 @@ export function parseRawEmailMessage(
     messageId,
     inReplyTo,
     internalDate,
+    isAutoReply,
   };
 }
 

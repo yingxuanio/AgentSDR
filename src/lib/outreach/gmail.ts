@@ -247,7 +247,22 @@ export type InboundMessage = {
   messageId: string | null;
   inReplyTo: string | null;
   internalDate: Date | null;
+  /** True when RFC 3834 / auto-responder headers indicate a machine / OOO auto-reply. */
+  isAutoReply?: boolean;
 };
+
+/** Detects RFC 3834 / standard auto-responder headers (excluding Exchange X-Auto-Response-Suppress). */
+export function hasAutoReplyHeaders(header: (name: string) => string | null | undefined): boolean {
+  const autoSubmitted = (header("Auto-Submitted") ?? "").trim().toLowerCase();
+  if (autoSubmitted && autoSubmitted !== "no") return true;
+  const xAutoreply = (header("X-Autoreply") ?? "").trim().toLowerCase();
+  if (xAutoreply === "yes" || xAutoreply === "true" || xAutoreply === "1") return true;
+  const xAutorespond = (header("X-Autorespond") ?? "").trim();
+  if (xAutorespond) return true;
+  const precedence = (header("Precedence") ?? "").trim().toLowerCase();
+  if (precedence === "auto_reply" || precedence === "junk") return true;
+  return false;
+}
 
 /** Best-effort plain-text body from a Gmail message payload (prefers text/plain, falls back to stripped text/html). */
 function extractBodyText(payload: import("googleapis").gmail_v1.Schema$MessagePart | undefined): string | null {
@@ -346,6 +361,7 @@ export async function fetchNewInboundMessages(
       messageId: header("Message-Id"),
       inReplyTo: header("In-Reply-To"),
       internalDate: msg.data.internalDate ? new Date(Number(msg.data.internalDate)) : null,
+      isAutoReply: hasAutoReplyHeaders(header),
     });
   }
 
