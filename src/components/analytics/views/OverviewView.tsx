@@ -13,6 +13,7 @@ import {
   RiThumbUpLine,
   RiTimerLine,
   RiTrophyLine,
+  RiUserSharedLine,
   RiWhatsappLine,
 } from "@remixicon/react";
 import * as Table from "@/components/alignui/table";
@@ -36,6 +37,7 @@ import type { ViewProps } from "./types";
  */
 
 const HINTS = {
+  reached: "Distinct contacts sent an outbound touch (CRM outreach, email campaign, LinkedIn, or WhatsApp) in this period.",
   replies: "Inbound messages received in CRM conversations in this period, on any channel.",
   positive: "Distinct CRM records moved into Interested or Customer in this period.",
   meetings: "Distinct CRM records moved into a meeting or demo subcategory in this period. No-shows are not counted.",
@@ -51,7 +53,8 @@ export function OverviewView({ data, loading, onSelectView }: ViewProps<"overvie
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-12 lg:gap-5">
-      <KpiStrip className="lg:col-span-12" columns={5}>
+      <KpiStrip className="lg:col-span-12" columns={6}>
+        <KpiCell icon={RiUserSharedLine} label="Contacts reached" value={formatCompact(kpis.reached.value)} metric={kpis.reached} hint={HINTS.reached} context={vsPrevious(kpis.reached)} />
         <KpiCell icon={RiReplyLine} label="Replies" value={formatCompact(crm.kpis.replies.value)} metric={crm.kpis.replies} hint={HINTS.replies} context={`from ${formatCompact(kpis.replied.value)} ${kpis.replied.value === 1 ? "person" : "people"}`} spark={replySpark} />
         <KpiCell icon={RiThumbUpLine} label="Positive" value={formatCompact(kpis.positive.value)} metric={kpis.positive} hint={HINTS.positive} context={kpis.replied.value > 0 ? `${formatPercent(kpis.positive.value / kpis.replied.value)} of people who replied` : vsPrevious(kpis.positive)} />
         <KpiCell icon={RiCalendarEventLine} label="Meetings" value={formatCompact(kpis.meetings.value)} metric={kpis.meetings} hint={HINTS.meetings} context={vsPrevious(kpis.meetings)} />

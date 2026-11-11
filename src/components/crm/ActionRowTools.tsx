@@ -534,17 +534,29 @@ export function SendDraftButton({
   onQueueInWorkingHours,
 }: {
   disabled?: boolean;
-  size?: "md" | "sm" | "xs";
+  size?: "md" | "sm" | "xs" | "xxs";
   label?: string;
   title?: string;
   ariaLabel?: string;
   onSendNow: () => void;
   onQueueInWorkingHours: () => void;
 }) {
-  const heightClass = size === "xs" ? "h-7 text-label-xs" : size === "sm" ? "h-8 text-label-sm" : "h-9 text-label-sm";
-  const mainPadClass = size === "xs" ? "gap-1.5 px-2.5" : "gap-2 px-3";
-  const triggerPadClass = size === "xs" ? "px-1.5" : "px-2";
-  const iconSizeClass = size === "xs" ? "size-3.5" : "size-4";
+  const heightClass =
+    size === "xxs"
+      ? "h-6 text-label-xs"
+      : size === "xs"
+        ? "h-7 text-label-xs"
+        : size === "sm"
+          ? "h-8 text-label-sm"
+          : "h-9 text-label-sm";
+  const mainPadClass =
+    size === "xxs"
+      ? "gap-1 px-2"
+      : size === "xs"
+        ? "gap-1.5 px-2.5"
+        : "gap-2 px-3";
+  const triggerPadClass = size === "xxs" ? "px-1" : size === "xs" ? "px-1.5" : "px-2";
+  const iconSizeClass = size === "xxs" ? "size-3" : size === "xs" ? "size-3.5" : "size-4";
   const sharedInteractive =
     "inline-flex items-center justify-center bg-primary-base text-static-white transition hover:bg-primary-darker focus-visible:z-10 focus-visible:outline-none focus-visible:shadow-button-primary-focus disabled:pointer-events-none disabled:bg-bg-weak-50 disabled:text-text-disabled-300";
 

@@ -34,8 +34,6 @@ import {
   RiQuestionLine,
   RiRefreshLine,
   RiReplyLine,
-  RiSendPlaneFill,
-  RiSendPlaneLine,
   RiSparklingFill,
   RiTimeLine,
   RiTimerLine,
@@ -54,7 +52,7 @@ import { EmptyState } from "@/components/page/EmptyState";
 import { PageHeader } from "@/components/page/PageHeader";
 import { cn } from "@/utils/cn";
 import { ContactAvatar } from "./ContactAvatar";
-import { ErrorState, primaryButtonClass, secondaryButtonClass } from "./CrmLayout";
+import { ErrorState, secondaryButtonClass } from "./CrmLayout";
 import { RowsSkeleton } from "./CrmSkeletons";
 import { CategoryDot, ClassificationPicker, HoverPreview, HoverPreviewProvider, InlineDraftEditor, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, SendDraftButton, humanize, type MoveStageBody, type RowMutation } from "./ActionRowTools";
 import { asList, asObject, CATEGORY_LABELS, crmFetch, deriveCrmRecordStageDisplay, displayName, errorMessage, extractLeadContext, formatDate, LEAD_CRM_BADGE_STYLE, relativeDate, timeAgo } from "./crm-utils";
@@ -502,8 +500,8 @@ export function ActionRows({ actions, categories, onActionsChange, pipeline, ref
           <Table.Row>
             <Table.Head scope="col" className="w-[19%] px-4">Contact</Table.Head>
             <Table.Head scope="col" className="w-[18%] px-4">Classification</Table.Head>
-            <Table.Head scope="col" className="w-[20%] px-4">Latest reply</Table.Head>
-            <Table.Head scope="col" className="w-[23%] px-4">Draft reply</Table.Head>
+            <Table.Head scope="col" className="w-[20%] px-4">Reply / Context</Table.Head>
+            <Table.Head scope="col" className="w-[23%] px-4">Draft</Table.Head>
             <Table.Head scope="col" className="w-[17%] px-3 text-right">{pipeline ? "Status" : "Due"}</Table.Head>
             <Table.Head scope="col" className="w-12 px-2"><span className="sr-only">More actions</span></Table.Head>
           </Table.Row>
@@ -688,8 +686,8 @@ export function describeAction(action: Action, categories: Data[], pipeline: boo
   const leadContext = extractLeadContext(person, company);
   const leadContextSummary = leadContext.leadReason || leadContext.verificationNote;
   const leadContextFull = [
-    leadContext.leadReason ? `录入理由与切入方案：\n${leadContext.leadReason}` : "",
-    leadContext.verificationNote ? `联系人核验依据：\n${leadContext.verificationNote}` : "",
+    leadContext.leadReason ? `【录入理由与切入方案】\n${leadContext.leadReason}` : "",
+    leadContext.verificationNote ? `【联系人核验依据】\n${leadContext.verificationNote}` : "",
   ].filter(Boolean).join("\n\n");
   const latestReplyFull = String(inbound.bodyText ?? action.latestInboundExcerpt ?? "").trim();
   const latestReply = String(action.latestInboundExcerpt ?? "").replace(/\s+/g, " ").trim();
@@ -813,24 +811,36 @@ function ChannelMark({ channel, className }: { channel: string; className?: stri
   return <span className={cn("flex shrink-0", className)} style={{ color: meta.color }} title={meta.label}><Icon className="size-3.5" aria-hidden="true" /></span>;
 }
 
-/** Their last message as a quote, with where and when it arrived underneath (falls back to lead context before first reply). */
+/**
+ * Reply / Context summary:
+ * 1. If an inbound reply arrived (`row.latestReply` or `row.record.lastInboundAt`),
+ *    renders the prospect's latest reply quote with channel + arrival time.
+ * 2. Before any reply, clearly marks "No reply yet" and — when prospecting notes
+ *    exist — previews the lead's entry rationale (`录入依据`) so hovering expands
+ *    the exact same prospecting & verification note without semantic ambiguity.
+ */
 function ReplyQuote({ row, lines = 1 }: { row: Row; lines?: 1 | 2 }) {
-  if (!row.latestReply && row.leadContextSummary) {
-    return <div className="min-w-0 border-l-2 border-primary-alpha-24 pl-2.5">
-      <p className={cn("text-paragraph-sm text-text-sub-600", lines === 1 ? "truncate" : "line-clamp-2")}>{row.leadContextSummary}</p>
-      <p className="mt-0.5 flex items-center gap-1.5 text-paragraph-xs text-text-soft-400">
-        <span>录入依据</span>
-        {row.leadContext.region && <><span>·</span><span className="truncate">{row.leadContext.region}</span></>}
+  const hasInbound = Boolean(row.latestReply || row.record.lastInboundAt);
+  if (hasInbound) {
+    return <div className="min-w-0 border-l-2 border-success-base/50 pl-2.5">
+      <p className={cn("text-paragraph-sm", lines === 1 ? "truncate" : "line-clamp-2", row.latestReply ? "text-text-strong-950" : "italic text-text-soft-400")}>{row.latestReply || "Inbound message (no body text)"}</p>
+      <p className="mt-0.5 flex items-center gap-1.5 text-paragraph-xs text-text-sub-600">
+        <ChannelMark channel={row.channel} />
+        <span>Replied {timeAgo(row.inbound.sentAt ?? row.record.lastInboundAt ?? row.repliedAt)}</span>
       </p>
     </div>;
   }
-  return <div className="min-w-0 border-l-2 border-stroke-soft-200 pl-2.5">
-    <p className={cn("text-paragraph-sm", lines === 1 ? "truncate" : "line-clamp-2", row.latestReply ? "text-text-strong-950" : "italic text-text-soft-400")}>{row.latestReply || "No message text"}</p>
-    <p className="mt-0.5 flex items-center gap-1.5 text-paragraph-xs text-text-sub-600">
-      <ChannelMark channel={row.channel} />
-      <span title={formatDate(row.repliedAt)}>{timeAgo(row.repliedAt)}</span>
-    </p>
-  </div>;
+  if (row.leadContextSummary) {
+    const contextMeta = [row.leadContext.companyCode, row.leadContext.region].filter(Boolean).join(" · ");
+    return <div className="min-w-0 border-l-2 border-primary-alpha-24 pl-2.5">
+      <p className={cn("text-paragraph-sm text-text-sub-600", lines === 1 ? "truncate" : "line-clamp-2")}>{row.leadContextSummary}</p>
+      <p className="mt-0.5 flex items-center gap-1.5 text-paragraph-xs text-text-soft-400">
+        <span className="shrink-0 rounded bg-bg-weak-50 px-1 py-px text-[11px] text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200">未回复 · 录入依据</span>
+        {contextMeta && <span className="truncate">{contextMeta}</span>}
+      </p>
+    </div>;
+  }
+  return <span className="text-paragraph-sm text-text-soft-400">No reply yet</span>;
 }
 
 /** The draft's state as coloured icon + label. */
@@ -945,8 +955,8 @@ function ActionRow({ action, categories, busy, editing, pipeline, now, onOpen, o
       </Table.Cell>
       <Table.Cell className="px-4 py-3">
         <HoverPreview
-          title={row.latestReplyFull ? (String(row.inbound.subject ?? "").trim() || row.name) : `${row.name}${row.leadContext.companyCode ? ` · ${row.leadContext.companyCode}` : ""}`}
-          meta={row.latestReplyFull ? formatDate(row.inbound.sentAt ?? row.repliedAt) : (row.leadContext.region || "拓客录入依据")}
+          title={row.latestReplyFull ? (String(row.inbound.subject ?? "").trim() || "Latest inbound reply") : "录入依据与核验来源（尚未收到客户回复）"}
+          meta={row.latestReplyFull ? formatDate(row.inbound.sentAt ?? row.repliedAt) : [row.leadContext.companyCode, row.leadContext.region].filter(Boolean).join(" · ")}
           body={row.latestReplyFull || row.leadContextFull}
         >
           <ReplyQuote row={row} />
@@ -1156,8 +1166,8 @@ export function ActionCard({ action, categories, now, busy, onOpen, onMutate, on
     </div>
 
     {(row.latestReply || row.leadContextSummary) && <HoverPreview
-      title={row.latestReplyFull ? (String(row.inbound.subject ?? "").trim() || row.name) : `${row.name}${row.leadContext.companyCode ? ` · ${row.leadContext.companyCode}` : ""}`}
-      meta={row.latestReplyFull ? formatDate(row.inbound.sentAt ?? row.repliedAt) : (row.leadContext.region || "拓客录入依据")}
+      title={row.latestReplyFull ? (String(row.inbound.subject ?? "").trim() || "Latest inbound reply") : "录入依据与核验来源（尚未收到客户回复）"}
+      meta={row.latestReplyFull ? formatDate(row.inbound.sentAt ?? row.repliedAt) : [row.leadContext.companyCode, row.leadContext.region].filter(Boolean).join(" · ")}
       body={row.latestReplyFull || row.leadContextFull}
       className="mt-3"
     >
@@ -1166,22 +1176,35 @@ export function ActionCard({ action, categories, now, busy, onOpen, onMutate, on
 
     {row.draftReply ? <div className="mt-3 rounded-lg bg-bg-weak-50 p-2.5 ring-1 ring-inset ring-stroke-soft-200">
       <HoverPreview
-        title={String(row.draft.subject ?? "").trim() || "Draft reply"}
+        title={String(row.draft.subject ?? "").trim() || "Draft"}
         meta={row.draftState.label}
         body={row.draftFull}
         onActivate={onOpen}
         actions={editable && <>
           <Link href={href} className={cn(secondaryButtonClass, "h-8")}>Open to edit</Link>
-          <button type="button" className={cn(primaryButtonClass, "h-8")} disabled={!sendable} onClick={() => sendDraft(row, onMutate)} title={sendTitle}><RiSendPlaneLine className="size-4" aria-hidden="true" />Send</button>
+          <SendDraftButton
+            size="sm"
+            disabled={!sendable}
+            title={sendTitle}
+            onSendNow={() => sendDraft(row, onMutate, false)}
+            onQueueInWorkingHours={() => sendDraft(row, onMutate, true)}
+          />
         </>}
       >
         <p className="line-clamp-2 text-paragraph-xs text-text-sub-600">{row.draftReply}</p>
       </HoverPreview>
       <div className="mt-2 flex items-center justify-between gap-2">
         <DraftStateLabel state={row.draftState} className="min-w-0 truncate" />
-        {editable && <div data-row-tools className="flex shrink-0 items-center gap-1">
+        {editable && <div data-row-tools className="flex shrink-0 items-center gap-1.5">
           <Button.Root variant="neutral" mode="stroke" size="xxsmall" asChild><Link href={href} aria-label={`Open ${row.name} to edit the draft`}><Button.Icon as={RiPencilLine} />Edit</Link></Button.Root>
-          <Button.Root variant="primary" mode="filled" size="xxsmall" disabled={!sendable} onClick={() => sendDraft(row, onMutate)} aria-label={`Send the draft to ${row.name}`} title={sendTitle}><Button.Icon as={RiSendPlaneFill} />Send</Button.Root>
+          <SendDraftButton
+            size="xxs"
+            disabled={!sendable}
+            title={sendTitle}
+            ariaLabel={`Send the draft to ${row.name}`}
+            onSendNow={() => sendDraft(row, onMutate, false)}
+            onQueueInWorkingHours={() => sendDraft(row, onMutate, true)}
+          />
         </div>}
       </div>
     </div>
@@ -1192,7 +1215,7 @@ export function ActionCard({ action, categories, now, busy, onOpen, onMutate, on
         <Badge.Icon as={chipRow.dueIcon} className="-ml-0.5 mr-0 size-3.5" /><span className="truncate">{chipRow.dueLabel === "—" ? "Nothing due" : chipRow.dueLabel}</span>
       </Badge.Root>
       {/* The quote above already says when they replied; this is the when of the chip. */}
-      <span className="shrink-0 text-paragraph-xs tabular-nums text-text-sub-600" title={formatDate(row.repliedAt)}>{row.dueDetail && row.dueDetail !== "—" ? row.dueDetail : row.latestReply ? "" : timeAgo(row.repliedAt)}</span>
+      <span className="shrink-0 text-paragraph-xs tabular-nums text-text-sub-600" title={formatDate(row.record.lastOutboundAt ?? row.repliedAt)}>{row.dueDetail && row.dueDetail !== "—" ? row.dueDetail : row.latestReply ? "" : timeAgo(row.record.lastOutboundAt ?? row.repliedAt)}</span>
     </div>
     {row.sequenceLabel && <p className="mt-1.5 truncate text-paragraph-xs text-text-soft-400" title={row.sequenceLabel}>{row.sequenceLabel}</p>}
   </article>;

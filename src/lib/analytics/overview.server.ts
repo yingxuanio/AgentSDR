@@ -52,6 +52,13 @@ function touches(range: AnalyticsRange) {
     WHERE m.direction = 'outbound' AND c.person_id IS NOT NULL
       AND c.account_id IN (SELECT id FROM whatsapp_accounts WHERE organization_id = ${org})
       AND NOT (m.raw IS NULL AND m.origin <> 'agentsdr' AND m.created_at - m.sent_at > interval '1 hour')
+      AND ${inCurrentOrPreviousRange(sql`m.sent_at`, range)}
+    UNION ALL
+    SELECT m.channel::text, m.person_id, m.sent_at
+    FROM crm_conversation_messages m
+    JOIN crm_conversations cv ON cv.id = m.conversation_id
+    WHERE cv.organization_id = ${org}
+      AND m.direction = 'outbound'
       AND ${inCurrentOrPreviousRange(sql`m.sent_at`, range)}`;
 }
 
