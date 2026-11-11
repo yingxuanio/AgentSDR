@@ -54,10 +54,15 @@ export function SentimentCard({ series, bucket, loading, className }: { series: 
 /** Category order for every CRM donut: validated adjacent-pair palette, gray last. */
 const CATEGORY_ORDER: CrmCategory[] = ["interested", "customer", "not_interested", "other", "unclassified"];
 
-function byCategory(rows: Array<{ categoryKey: CrmCategory; value: number }>): DonutItem[] {
+function byCategory(rows: Array<{ categoryKey: CrmCategory; value: number }>, unclassifiedLabel?: string): DonutItem[] {
   const totals = new Map<CrmCategory, number>();
   for (const r of rows) totals.set(r.categoryKey, (totals.get(r.categoryKey) ?? 0) + r.value);
-  return CATEGORY_ORDER.map((k) => ({ key: k, label: CATEGORY_LABEL[k], value: totals.get(k) ?? 0, color: SENTIMENT_KEYS[k].color }));
+  return CATEGORY_ORDER.map((k) => ({
+    key: k,
+    label: k === "unclassified" && unclassifiedLabel ? unclassifiedLabel : CATEGORY_LABEL[k],
+    value: totals.get(k) ?? 0,
+    color: SENTIMENT_KEYS[k].color,
+  }));
 }
 
 /** A small uppercase label between a card's donut and its list. */
@@ -73,7 +78,7 @@ export function PipelineCard({ value: pipeline, loading, className }: CardProps<
     <Frame className={className} aria-busy={loading || undefined}>
       <FrameHeader title="Pipeline now" description="Open records by category, right now, and how far along the funnel they are." />
       <FramePanel className={cn("transition-opacity", loading && "opacity-60")}>
-        <DonutChart items={byCategory(pipeline.map((p) => ({ categoryKey: p.categoryKey, value: p.count })))} centerLabel="open records" emptyLabel="No open records" emptyDescription="Nothing is open in the CRM right now." />
+        <DonutChart items={byCategory(pipeline.map((p) => ({ categoryKey: p.categoryKey, value: p.count })), "Outreach / Pre-reply")} centerLabel="open records" emptyLabel="No open records" emptyDescription="Nothing is open in the CRM right now." />
         {stages.length > 0 && (
           <>
             <SubHeading>Funnel stages · darker as they advance</SubHeading>

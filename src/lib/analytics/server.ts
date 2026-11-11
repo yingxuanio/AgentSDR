@@ -104,3 +104,24 @@ export function num(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value);
   return Number.isFinite(n) ? n : 0;
 }
+
+/**
+ * Excludes automated machine replies (RFC 3834 Auto-Submitted / X-Autoreply,
+ * explicit Auto-Reply / Out of Office subjects, and messages classified by AI
+ * into `out_of_office` or `left_company`) so Analytics `Replied` / `Reply Rate`
+ * reflects genuine human responses while keeping auto-replies in CRM threads.
+ */
+export function isHumanInboundMessageSql(alias: SQL = sql.raw("m")): SQL {
+  return sql`(
+    coalesce((${alias}.raw->>'isAutoReply')::boolean, false) = false
+    AND coalesce(${alias}.subject, '') !~* '^\\s*(auto[- ]?reply|automatic reply|out of office|autoreply|自动回复|自動回覆)([:：\\s\\-]|$)'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM crm_classifications cc_ar
+      JOIN crm_subcategories sc_ar ON sc_ar.id = coalesce(cc_ar.applied_subcategory_id, cc_ar.proposed_subcategory_id)
+      WHERE cc_ar.message_id = ${alias}.id
+        AND cc_ar.status IN ('auto_applied', 'accepted', 'overridden', 'proposed')
+        AND sc_ar.key IN ('out_of_office', 'left_company')
+    )
+  )`;
+}

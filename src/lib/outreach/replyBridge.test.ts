@@ -447,3 +447,142 @@ test("a non-recipient on an unknown thread stays Master-Inbox-only", async () =>
   assert.deepEqual(result, { leadId: "inbox-contact-2", skipped: false });
   assert.equal(contactArg, undefined);
 });
+
+test("skips message when explicitly addressed to another configured org mailbox", async () => {
+  let stored = false;
+  const log = createStepLogger();
+  const result = await ingestGmailReply("ivan@linktion.cn", {
+    gmailMessageId: "imap-13875",
+    threadId: null,
+    fromEmail: "client@example.com",
+    fromName: "Client",
+    toEmail: "ivan@yingxuan.io",
+    to: [{ email: "ivan@yingxuan.io", name: null }],
+    cc: [],
+    replyTo: [],
+    ccEmails: [],
+    subject: "Inquiry",
+    bodyText: "Hello Yingxuan team",
+    messageId: "<test-msg-1@example.com>",
+    inReplyTo: null,
+    internalDate: new Date("2026-11-10T00:00:00.000Z"),
+  }, log, {
+    isOtherOrgMailbox: async (email) => email === "ivan@yingxuan.io",
+    storeInMasterInbox: async () => {
+      stored = true;
+      return { leadId: "lead-1", created: true };
+    },
+  });
+
+  assert.deepEqual(result, { leadId: null, skipped: true });
+  assert.equal(stored, false);
+  assert.match(log.steps.map((s) => s.message).join("\n"), /belongs to another configured mailbox/);
+});
+
+test("skips duplicate CRM processing if message was already stored in Master Inbox", async () => {
+  let crmIngested = false;
+  const log = createStepLogger();
+  const result = await ingestGmailReply("ivan@yingxuan.io", {
+    gmailMessageId: "imap-13875",
+    threadId: null,
+    fromEmail: "client@example.com",
+    fromName: "Client",
+    toEmail: "ivan@yingxuan.io",
+    to: [{ email: "ivan@yingxuan.io", name: null }],
+    cc: [],
+    replyTo: [],
+    ccEmails: [],
+    subject: "Inquiry",
+    bodyText: "Hello",
+    messageId: "<test-msg-1@example.com>",
+    inReplyTo: null,
+    internalDate: new Date("2026-11-10T00:00:00.000Z"),
+  }, log, {
+    isKnownOutreachRecipient: async () => true,
+    storeInMasterInbox: async () => {
+      // Simulate that the message was already stored by a previous run or another alias
+      return { leadId: "lead-1", created: false };
+    },
+    ingestCrm: async () => {
+      crmIngested = true;
+      throw new Error("Should not be called for duplicate");
+    },
+  });
+
+  assert.deepEqual(result, { leadId: "lead-1", skipped: true });
+  assert.equal(crmIngested, false);
+  assert.match(log.steps.map((s) => s.message).join("\n"), /skipping duplicate CRM work/);
+});
+
+test("Aliyun Enterprise Mail Chinese bounce notification suppresses the failed recipient with diagnostic", async () => {
+  const suppressed: Array<{ email: string; note?: string | null }> = [];
+  const log = createStepLogger();
+  const result = await ingestGmailReply("ivan@yingxuan.io", {
+    gmailMessageId: "imap-13880",
+    threadId: null,
+    fromEmail: "no-reply@mailsupport.aliyun.com",
+    fromName: "阿里邮箱",
+    toEmail: "ivan@yingxuan.io",
+    to: [{ email: "ivan@yingxuan.io", name: null }],
+    cc: [],
+    replyTo: [],
+    ccEmails: [],
+    subject: "来自no-reply@mailsupport.aliyun.com的退信",
+    bodyText: [
+      "很抱歉您发送的邮件被退回，以下是该邮件的相关信息：",
+      "发件人 : ivan@yingxuan.io",
+      "主题 : 關於 S.I.T. Freight 的系統交付支援",
+      "无法发送到 wendy@sit-asia.com.hk",
+      "系统应答:the mta server of sit-asia.com.hk -- bizavmta1.netvigator.com(218.102.23.108) reply:550 #5.1.0 Address rejected. at 2026-11-11 13:01:36",
+    ].join("\n"),
+    messageId: "<aliyun-bounce-1@aliyun.com>",
+    inReplyTo: null,
+    internalDate: new Date("2026-11-11T05:01:36.000Z"),
+  }, log, {
+    storeInMasterInbox: async () => {
+      throw new Error("Aliyun bounce must never become a Master Inbox contact");
+    },
+    suppress: async (email, _reason, note) => {
+      suppressed.push({ email, note });
+    },
+  });
+
+  assert.deepEqual(result, { leadId: null, skipped: false });
+  assert.equal(suppressed.length, 1);
+  assert.equal(suppressed[0].email, "wendy@sit-asia.com.hk");
+  assert.match(suppressed[0].note ?? "", /550 #5\.1\.0 Address rejected/);
+});
+
+test("sender SPF/DKIM authentication bounce does not blacklist a valid recipient address", async () => {
+  const suppressed: string[] = [];
+  const log = createStepLogger();
+  const result = await ingestGmailReply("ivan@yingxuan.io", {
+    gmailMessageId: "imap-13876",
+    threadId: null,
+    fromEmail: "no-reply@mailsupport.aliyun.com",
+    fromName: "阿里邮箱",
+    toEmail: "ivan@yingxuan.io",
+    to: [{ email: "ivan@yingxuan.io", name: null }],
+    cc: [],
+    replyTo: [],
+    ccEmails: [],
+    subject: "来自no-reply@mailsupport.aliyun.com的退信",
+    bodyText: [
+      "无法发送到 junyu033731525@gmail.com",
+      "系统应答:the mta server of gmail.com reply:550 5.7.26 Your email has been blocked because the sender is unauthenticated. Gmail requires all senders to authenticate with either SPF or DKIM.",
+    ].join("\n"),
+    messageId: "<aliyun-bounce-spf@aliyun.com>",
+    inReplyTo: null,
+    internalDate: new Date("2026-11-10T03:28:09.000Z"),
+  }, log, {
+    storeInMasterInbox: async () => {
+      throw new Error("SPF bounce must not become a Master Inbox contact");
+    },
+    suppress: async (email) => {
+      suppressed.push(email);
+    },
+  });
+
+  assert.deepEqual(result, { leadId: null, skipped: true });
+  assert.deepEqual(suppressed, []);
+});

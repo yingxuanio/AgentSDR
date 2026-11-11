@@ -6,13 +6,13 @@ import { campaigns as linkedinCampaigns, leads as linkedinLeads } from "@/lib/li
 import { inferCompanyDomainFromEmail, normalizeCompanyDomain, normalizeEmail, normalizeLinkedinSlug } from "./identity";
 import { personProfile } from "./variables";
 import { crmProjectionForPeople } from "@/lib/crm/queries";
-import { crmClassifications, crmRecords } from "@/lib/crm/schema";
+import { crmClassifications, crmDrafts, crmPersonContactPolicies, crmRecords } from "@/lib/crm/schema";
 import { currentOrganizationId, inOrg } from "@/lib/tenancy/scope";
 
 export type LeadTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type LeadExecutor = Pick<LeadTransaction, "select" | "insert" | "update" | "delete" | "execute">;
 type PersonSnapshot = Pick<typeof people.$inferSelect,
-  "id" | "email" | "linkedinUrl" | "firstName" | "lastName" | "fullName" | "title" | "profilePictureUrl" | "phone" | "companyId" | "raw"
+  "id" | "email" | "linkedinUrl" | "firstName" | "lastName" | "fullName" | "title" | "profilePictureUrl" | "phone" | "companyId" | "custom" | "raw"
 >;
 export type LeadMutationContext = {
   companyCache?: Map<string, typeof companies.$inferSelect>;
@@ -34,8 +34,10 @@ export type CanonicalPersonInput = {
     domain?: string | null;
     name?: string | null;
     linkedinUrl?: string | null;
+    custom?: Record<string, unknown>;
     raw?: Record<string, unknown>;
   } | null;
+  custom?: Record<string, unknown>;
   raw?: Record<string, unknown>;
   source: string;
 };
@@ -116,16 +118,34 @@ export async function upsertCompany(
   const domain = normalizeCompanyDomain(input.domain);
   if (!domain) return null;
 
+  const rawValues = input.raw ?? {};
+  const customValues: Record<string, unknown> = Object.fromEntries(
+    Object.entries(input.custom ?? {}).filter(([, value]) => value !== undefined && value !== null && value !== ""),
+  );
+  if (typeof rawValues.x_code === "string" && rawValues.x_code.trim() && customValues.x_code === undefined) {
+    customValues.x_code = rawValues.x_code.trim();
+  }
+  if (typeof rawValues.company_code === "string" && rawValues.company_code.trim() && customValues.x_code === undefined) {
+    customValues.x_code = rawValues.company_code.trim();
+  }
+  if (typeof rawValues.x_region === "string" && rawValues.x_region.trim() && customValues.x_region === undefined) {
+    customValues.x_region = rawValues.x_region.trim();
+  }
+  if (typeof rawValues.x_lead_reason === "string" && rawValues.x_lead_reason.trim() && customValues.x_lead_reason === undefined) {
+    customValues.x_lead_reason = rawValues.x_lead_reason.trim();
+  }
+
   const values = {
     name: clean(input.name),
     linkedinUrl: clean(input.linkedinUrl),
-    raw: input.raw ?? {},
+    raw: rawValues,
   };
   const cached = context?.companyCache?.get(domain);
   if (cached) {
     const unchanged = (values.name === null || cached.name === values.name)
       && (values.linkedinUrl === null || cached.linkedinUrl === values.linkedinUrl)
-      && Object.entries(values.raw).every(([key, value]) => cached.raw?.[key] === value);
+      && Object.entries(values.raw).every(([key, value]) => cached.raw?.[key] === value)
+      && Object.entries(customValues).every(([key, value]) => cached.custom?.[key] === value);
     if (unchanged) return cached;
     const [updated] = await tx
       .update(companies)
@@ -133,6 +153,7 @@ export async function upsertCompany(
         name: values.name ?? cached.name,
         linkedinUrl: values.linkedinUrl ?? cached.linkedinUrl,
         raw: { ...(cached.raw ?? {}), ...values.raw },
+        custom: { ...(cached.custom ?? {}), ...customValues },
         updatedAt: new Date(),
       })
       .where(and(inOrg(companies), eq(companies.id, cached.id)))
@@ -151,6 +172,7 @@ export async function upsertCompany(
         name: values.name ?? existing.name,
         linkedinUrl: values.linkedinUrl ?? existing.linkedinUrl,
         raw: { ...(existing.raw ?? {}), ...values.raw },
+        custom: { ...(existing.custom ?? {}), ...customValues },
         updatedAt: new Date(),
       })
       .where(and(inOrg(companies), eq(companies.id, existing.id)))
@@ -161,7 +183,7 @@ export async function upsertCompany(
 
   const [created] = await tx
     .insert(companies)
-    .values({ organizationId: currentOrganizationId(), domain, ...values, source: input.source })
+    .values({ organizationId: currentOrganizationId(), domain, ...values, custom: customValues, source: input.source })
     .returning();
   context?.companyCache?.set(domain, created);
   return created;
@@ -197,6 +219,9 @@ export async function upsertPerson(tx: LeadExecutor, input: CanonicalPersonInput
     ?? (linkedinUrl ? matches.find((row) => row.linkedinUrl === linkedinUrl) : undefined);
   if (existing) assertCompatiblePersonIdentities(existing, { email, linkedinUrl });
   const names = resolvePersonNames(input, existing, { replaceExisting: context?.replaceNames });
+  const customValues: Record<string, unknown> = Object.fromEntries(
+    Object.entries(input.custom ?? {}).filter(([, value]) => value !== undefined && value !== null && value !== ""),
+  );
   const next = {
     email,
     linkedinUrl,
@@ -205,6 +230,7 @@ export async function upsertPerson(tx: LeadExecutor, input: CanonicalPersonInput
     profilePictureUrl: clean(input.profilePictureUrl),
     phone: clean(input.phone),
     companyId: company?.id ?? null,
+    custom: customValues,
     raw: {
       ...personRawFromInput(input),
       ...(!company && input.company?.name ? { company: clean(input.company.name), companyName: clean(input.company.name) } : {}),
@@ -225,6 +251,7 @@ export async function upsertPerson(tx: LeadExecutor, input: CanonicalPersonInput
         profilePictureUrl: next.profilePictureUrl ?? existing.profilePictureUrl,
         phone: next.phone ?? existing.phone,
         companyId: next.companyId ?? existing.companyId,
+        custom: Object.keys(customValues).length ? { ...(existing.custom ?? {}), ...customValues } : existing.custom,
         raw: mergePersonRaw(existing.raw, next.raw),
         updatedAt: new Date(),
       })
@@ -343,17 +370,22 @@ export type CampaignMembership = {
   status: string;
 };
 
-type PersonListInput = {
+export type PersonListInput = {
   q?: string;
+  email?: string;
+  domain?: string;
+  company?: string;
   limit?: number;
   offset?: number;
   campaignChannel?: "email" | "linkedin" | "unassigned";
   hasEmail?: boolean;
   hasLinkedin?: boolean;
   hasPhone?: boolean;
+  dnc?: boolean;
+  closed?: boolean;
   sort?: "name" | "title" | "email" | "company" | "updated" | "created";
   direction?: "asc" | "desc";
-  crmCategory?: "customer" | "interested" | "not_interested" | "other";
+  crmCategory?: "customer" | "interested" | "not_interested" | "other" | "contacted" | "draft_ready" | "queued" | "new_lead";
   crmWorkflowState?: "unclassified" | "classifying" | "action_required" | "waiting" | "idle" | "paused" | "closed" | "error";
   crmSubcategoryId?: string;
   crmAiChange?: boolean;
@@ -392,9 +424,16 @@ export async function campaignMemberships(personIds: string[]) {
 export async function listPeoplePage(input: PersonListInput = {}) {
   const { limit, offset } = listBounds(input);
   const term = input.q?.trim() ? `%${input.q.trim()}%` : null;
+  const normalizedEmailFilter = input.email?.trim() ? normalizeEmail(input.email.trim()) : null;
+  const normalizedDomainFilter = input.domain?.trim() ? normalizeCompanyDomain(input.domain.trim()) : null;
+  const trimmedCompanyFilter = input.company?.trim() ? input.company.trim() : null;
+
   const conditions = [
     inOrg(people),
     term ? or(ilike(people.email, term), ilike(people.linkedinUrl, term), ilike(people.fullName, term), ilike(people.title, term), ilike(companies.name, term), ilike(companies.domain, term), sql`${people.raw}::text ilike ${term}`, sql`${people.custom}::text ilike ${term}`) : undefined,
+    normalizedEmailFilter ? sql`lower(${people.email}) = ${normalizedEmailFilter}` : undefined,
+    normalizedDomainFilter ? sql`lower(${companies.domain}) = ${normalizedDomainFilter}` : undefined,
+    trimmedCompanyFilter ? or(ilike(companies.name, trimmedCompanyFilter), ilike(companies.name, `%${trimmedCompanyFilter}%`)) : undefined,
     input.hasEmail === true ? sql`${people.email} is not null` : undefined,
     input.hasLinkedin === true ? sql`${people.linkedinUrl} is not null` : undefined,
     input.hasPhone === true ? sql`${people.phone} is not null` : undefined,
@@ -406,13 +445,84 @@ export async function listPeoplePage(input: PersonListInput = {}) {
           sql`not exists (select 1 from "Lead" where "personId" = ${people.id})`,
         )
       : undefined,
-    input.crmCategory ? exists(db.select({ id: crmRecords.id }).from(crmRecords).where(and(eq(crmRecords.personId, people.id), eq(crmRecords.categoryKey, input.crmCategory)))) : undefined,
+    input.crmCategory
+      ? input.crmCategory === "contacted"
+        ? exists(
+            db.select({ id: crmRecords.id }).from(crmRecords).where(
+              and(
+                eq(crmRecords.personId, people.id),
+                sql`${crmRecords.categoryKey} is null`,
+                sql`${crmRecords.lastOutboundAt} is not null`,
+                sql`${crmRecords.lastInboundAt} is null`,
+                sql`${crmRecords.workflowState} not in ('closed', 'error')`,
+              ),
+            ),
+          )
+        : input.crmCategory === "queued"
+          ? exists(
+              db.select({ id: crmRecords.id })
+                .from(crmRecords)
+                .innerJoin(crmDrafts, eq(crmDrafts.crmRecordId, crmRecords.id))
+                .where(
+                  and(
+                    eq(crmRecords.personId, people.id),
+                    sql`${crmRecords.categoryKey} is null`,
+                    eq(crmDrafts.status, "awaiting_review"),
+                    sql`${crmDrafts.autoSendAt} is not null`,
+                  ),
+                ),
+            )
+          : input.crmCategory === "draft_ready"
+            ? exists(
+                db.select({ id: crmRecords.id }).from(crmRecords).where(
+                  and(
+                    eq(crmRecords.personId, people.id),
+                    sql`${crmRecords.categoryKey} is null`,
+                    or(
+                      eq(crmRecords.workflowState, "action_required"),
+                      exists(
+                        db.select({ id: crmDrafts.id }).from(crmDrafts).where(
+                          and(
+                            eq(crmDrafts.crmRecordId, crmRecords.id),
+                            eq(crmDrafts.status, "awaiting_review"),
+                            sql`${crmDrafts.autoSendAt} is null`,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              )
+            : input.crmCategory === "new_lead"
+              ? exists(
+                  db.select({ id: crmRecords.id }).from(crmRecords).where(
+                    and(
+                      eq(crmRecords.personId, people.id),
+                      sql`${crmRecords.categoryKey} is null`,
+                      sql`${crmRecords.lastOutboundAt} is null`,
+                      sql`${crmRecords.lastInboundAt} is null`,
+                      sql`${crmRecords.workflowState} not in ('action_required', 'closed', 'error')`,
+                    ),
+                  ),
+                )
+              : exists(db.select({ id: crmRecords.id }).from(crmRecords).where(and(eq(crmRecords.personId, people.id), eq(crmRecords.categoryKey, input.crmCategory))))
+      : undefined,
     input.crmWorkflowState ? exists(db.select({ id: crmRecords.id }).from(crmRecords).where(and(eq(crmRecords.personId, people.id), eq(crmRecords.workflowState, input.crmWorkflowState)))) : undefined,
     input.crmSubcategoryId ? exists(db.select({ id: crmRecords.id }).from(crmRecords).where(and(eq(crmRecords.personId, people.id), eq(crmRecords.subcategoryId, input.crmSubcategoryId)))) : undefined,
     input.crmAiChange === true ? exists(
       db.select({ id: crmClassifications.id }).from(crmClassifications)
         .innerJoin(crmRecords, eq(crmRecords.id, crmClassifications.crmRecordId))
         .where(and(eq(crmRecords.personId, people.id), sql`${crmClassifications.acknowledgedAt} is null`)),
+    ) : undefined,
+    input.dnc !== undefined ? (
+      input.dnc
+        ? exists(db.select({ personId: crmPersonContactPolicies.personId }).from(crmPersonContactPolicies).where(and(eq(crmPersonContactPolicies.personId, people.id), eq(crmPersonContactPolicies.doNotContact, true))))
+        : sql`not exists (select 1 from crm_person_contact_policies where person_id = ${people.id} and do_not_contact is true)`
+    ) : undefined,
+    input.closed !== undefined ? (
+      input.closed
+        ? exists(db.select({ id: crmRecords.id }).from(crmRecords).where(and(eq(crmRecords.personId, people.id), eq(crmRecords.workflowState, "closed"))))
+        : sql`not exists (select 1 from crm_records where person_id = ${people.id} and workflow_state = 'closed')`
     ) : undefined,
   ].filter(Boolean);
   const where = conditions.length ? and(...conditions) : undefined;
@@ -440,18 +550,45 @@ export async function listPeoplePage(input: PersonListInput = {}) {
       .leftJoin(companies, and(eq(people.companyId, companies.id), inOrg(companies)))
       .where(where),
   ]);
-  const memberships = await campaignMemberships(rows.map((row) => row.person.id));
-  const crm = await crmProjectionForPeople(rows.map((row) => row.person.id));
+  const personIds = rows.map((row) => row.person.id);
+  const [memberships, crm, policies] = await Promise.all([
+    campaignMemberships(personIds),
+    crmProjectionForPeople(personIds),
+    personIds.length
+      ? db.select().from(crmPersonContactPolicies).where(inArray(crmPersonContactPolicies.personId, personIds))
+      : [],
+  ]);
+  const policyByPerson = new Map(policies.map((p) => [p.personId, p]));
+
   return {
     total,
     rows: rows.map(({ person, company }) => {
-    const profile = personProfile(person, company);
-    return {
-      person: { ...person, fullName: profile.name, firstName: profile.firstName, lastName: profile.lastName, title: profile.headline },
-      company,
-      campaigns: memberships.get(person.id) ?? [],
-      crm: crm.get(person.id) ?? null,
-    };
+      const profile = personProfile(person, company);
+      const crmEntry = crm.get(person.id) ?? null;
+      const personPolicy = policyByPerson.get(person.id) ?? null;
+      const dnc = Boolean(personPolicy?.doNotContact);
+      const closed = crmEntry ? crmEntry.workflowState === "closed" : false;
+      const contactPolicy = personPolicy ? {
+        doNotContact: personPolicy.doNotContact,
+        reason: personPolicy.reason,
+        source: personPolicy.source,
+        reviewAfter: personPolicy.reviewAfter,
+        setAt: personPolicy.setAt,
+        clearedAt: personPolicy.clearedAt,
+      } : null;
+
+      return {
+        person: { ...person, fullName: profile.name, firstName: profile.firstName, lastName: profile.lastName, title: profile.headline },
+        company,
+        campaigns: memberships.get(person.id) ?? [],
+        crm: crmEntry,
+        contactPolicy,
+        dnc,
+        closed,
+        lastOutboundAt: crmEntry?.lastOutboundAt ?? null,
+        lastInboundAt: crmEntry?.lastInboundAt ?? null,
+        lastInteractionAt: crmEntry?.lastInteractionAt ?? null,
+      };
     }),
   };
 }

@@ -33,11 +33,11 @@ const SEND_KEYS: SeriesKeys<"firstTouch" | "followUp"> = {
 const REPLY_KEYS: SeriesKeys<"replies"> = { replies: { label: "Replies", color: EMAIL } };
 
 const HINTS = {
-  sent: "Emails sent in this period, first touches and follow-ups both.",
+  sent: "Emails sent in this period across direct CRM outreach and email campaigns, first touches and follow-ups both.",
   contacted: "Distinct leads who were sent their first email in this period.",
-  replied: "Distinct people in an email campaign who sent an inbound email reply in this period.",
+  replied: "Distinct people who sent an inbound email reply in this period.",
   replyRate: "Replied divided by leads contacted, for the same period.",
-  bounced: "Addresses added to the suppression list as bounced in this period.",
+  bounced: "Distinct recipient addresses that bounced or failed SMTP delivery in this period.",
   unsubscribed: "Addresses added to the suppression list as unsubscribed in this period.",
 };
 
@@ -162,16 +162,16 @@ function CampaignsTable({ campaigns, loading }: { campaigns: EmailAnalytics["cam
   const num = "h-12 text-right text-paragraph-sm tabular-nums text-text-strong-950";
   return (
     <Frame className="lg:col-span-12">
-      <FrameHeader title="Campaigns" description="Sends are for this period; leads, replies and bounces are all time. Sorted by sends." />
+      <FrameHeader title="Campaigns & Outreach" description="Sends are for this period; leads, replies and bounces are all time. Sorted by sends." />
       <FramePanel className={cn("overflow-x-auto p-2 transition-opacity sm:p-3", loading && "opacity-60")}>
         {campaigns.length === 0 ? (
-          <p className="py-10 text-center text-paragraph-sm text-text-sub-600">No email campaigns yet.</p>
+          <p className="py-10 text-center text-paragraph-sm text-text-sub-600">No email outreach activity yet.</p>
         ) : (
           <Table.Root>
-            <Table.Caption className="sr-only">Email campaigns</Table.Caption>
+            <Table.Caption className="sr-only">Email campaigns and outreach</Table.Caption>
             <Table.Header>
               <Table.Row>
-                <Table.Head scope="col">Campaign</Table.Head>
+                <Table.Head scope="col">Source</Table.Head>
                 <Table.Head scope="col" className="text-right">Leads</Table.Head>
                 <Table.Head scope="col" className="text-right">Contacted</Table.Head>
                 <Table.Head scope="col">Sent</Table.Head>
@@ -183,11 +183,12 @@ function CampaignsTable({ campaigns, loading }: { campaigns: EmailAnalytics["cam
             <Table.Body spacing={4}>
               {campaigns.map((c) => {
                 const status = CAMPAIGN_STATUS[c.status] ?? { tone: "neutral" as const, label: c.status };
+                const href = c.id === "__direct_crm_email__" ? "/crm/pipeline" : `/outreach/campaigns/${c.id}`;
                 return (
                   <Table.Row key={c.id}>
                     <Table.Cell className="h-12">
                       <div className="flex min-w-0 items-center gap-3">
-                        <Link href={`/outreach/campaigns/${c.id}`} className="max-w-64 truncate rounded-md text-label-sm text-text-strong-950 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary-base">{c.name}</Link>
+                        <Link href={href} className="max-w-64 truncate rounded-md text-label-sm text-text-strong-950 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary-base">{c.name}</Link>
                         <StatusDotBadge status={status.tone}>{status.label}</StatusDotBadge>
                       </div>
                     </Table.Cell>

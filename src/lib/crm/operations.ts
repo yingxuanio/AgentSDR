@@ -336,13 +336,31 @@ export async function closeCrmRecord(input: {
 }) {
   return withCrmTransaction(async (tx) => {
     const record = await lockCrmRecord(tx, input.recordId);
+    const now = new Date();
     await interruptActiveSequenceRunInTransaction(tx, {
       recordId: record.id,
       reason: "record_closed",
       contextVersion: record.contextVersion,
     });
-    await tx.update(crmSequenceRuns).set({ status: "cancelled", updatedAt: new Date() })
+    await tx.update(crmSequenceRuns).set({ status: "cancelled", updatedAt: now })
       .where(and(eq(crmSequenceRuns.crmRecordId, record.id), eq(crmSequenceRuns.status, "interrupted")));
+    const discardedDrafts = await tx.update(crmDrafts)
+      .set({ status: "discarded", autoSendAt: null, updatedAt: now })
+      .where(and(eq(crmDrafts.crmRecordId, record.id), inArray(crmDrafts.status, ["generating", "awaiting_review", "failed"])))
+      .returning({ id: crmDrafts.id });
+    for (const draft of discardedDrafts) {
+      await appendCrmEvent(tx, {
+        personId: record.personId,
+        crmRecordId: record.id,
+        pipelineId: record.pipelineId,
+        eventType: "draft.discarded",
+        actorType: "authenticated_operator",
+        actorRef: input.actorRef,
+        fromData: { draftId: draft.id },
+        toData: { status: "discarded", reason: "record_closed" },
+        contextVersion: record.contextVersion,
+      });
+    }
     return transitionWorkflowInTransaction(tx, {
       recordId: record.id,
       to: "closed",

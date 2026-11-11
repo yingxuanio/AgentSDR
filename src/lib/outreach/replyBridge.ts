@@ -1,15 +1,15 @@
 /** Stores Gmail mail in Master Inbox and routes known contacts into CRM. */
-import { and, eq } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { inboxContacts, inboxMessages } from "@/lib/inbox/schema";
 import { type StepLogger } from "@/lib/debugLog";
 import { htmlToPlainText, looksLikeHtml } from "@/lib/email/htmlToText";
-import { outreachLeads } from "./schema";
+import { mailboxes, outreachLeads } from "./schema";
 import { suppressEmailOutreach } from "./suppression";
 import type { InboundMessage } from "./gmail";
 import { upsertPerson, withLeadTransaction } from "@/lib/leads/records";
 import { people } from "@/lib/leads/schema";
-import { crmConversations } from "@/lib/crm/schema";
+import { crmConversationMessages, crmConversations, crmRecords } from "@/lib/crm/schema";
 import { gmailInboundEventKey } from "./inboundIdentity";
 import { ingestInboundReply as ingestCrmInboundReply } from "@/lib/crm/conversations";
 import { quarantineCrmIdentity } from "@/lib/crm/identity";
@@ -19,14 +19,12 @@ import { leadsInOrg } from "./orgScope";
 /**
  * Who a delivery report comes from.
  *
- * Gmail relays its own failures as mailer-daemon@googlemail.com, but that is
- * only the synchronous case — the message never left. When the destination
- * server accepts a message and rejects it afterwards, the report comes back
- * from that domain's own postmaster (postmaster@prospect.example.com and friends),
- * which is why matching one literal address missed 68 hard-bounced addresses:
- * none were suppressed and 37 were still scheduled for follow-ups.
+ * Gmail relays its own failures as mailer-daemon@googlemail.com, destination
+ * MTAs report via postmaster@*, and Aliyun Enterprise Mail (阿里邮箱) delivers
+ * asynchronous bounce reports from no-reply@mailsupport.aliyun.com.
  */
 const BOUNCE_LOCAL_PARTS = new Set(["mailer-daemon", "postmaster"]);
+const BOUNCE_SENDERS = new Set(["no-reply@mailsupport.aliyun.com"]);
 
 /**
  * Subjects mail systems use for a failure report. Checked only as a fallback
@@ -40,6 +38,8 @@ const BOUNCE_SUBJECTS = [
   /delivery status notification \(failure\)/i,
   /delivery (has failed|failure)/i,
   /mail delivery (failed|subsystem)/i,
+  /(?:来自.+的)?退信/,
+  /系统退信|邮件退回|退回邮件|未送达|投递失败|无法投递/,
 ];
 
 /**
@@ -59,7 +59,7 @@ function localPart(email: string): string {
 export function looksLikeBounceNotification(msg: Pick<InboundMessage, "fromEmail" | "subject">): boolean {
   const from = msg.fromEmail?.toLowerCase() ?? "";
   if (!from) return false;
-  if (BOUNCE_LOCAL_PARTS.has(localPart(from))) return true;
+  if (BOUNCE_SENDERS.has(from) || BOUNCE_LOCAL_PARTS.has(localPart(from))) return true;
   const subject = msg.subject ?? "";
   return BOUNCE_SUBJECTS.some((pattern) => pattern.test(subject));
 }
@@ -113,6 +113,8 @@ export function parseBouncedRecipient(bodyText: string | null): string | null {
     /address\(es\) failed:\s*\n+\s*([^\s]+@[^\s]+)/i,
     /recipients failed permanently:\s*\n+\s*\*?\s*([^\s]+@[^\s]+)/i,
     /Final-Recipient:\s*rfc822;\s*([^\s]+@[^\s]+)/i,
+    /无法(?:发送|投递)到\s*([^\s]+@[^\s]+)/i,
+    /(?:收件人|目标邮箱)\s*[:：]\s*([^\s]+@[^\s]+)/i,
   ];
   for (const pattern of patterns) {
     const match = bodyText.match(pattern);
@@ -124,11 +126,24 @@ export function parseBouncedRecipient(bodyText: string | null): string | null {
   return null;
 }
 
+export function isSenderAuthenticationBounce(bodyText: string | null): boolean {
+  if (!bodyText) return false;
+  return /\b5\.7\.26\b|sender is unauthenticated|authenticate with either SPF or DKIM/i.test(bodyText);
+}
+
+export function extractBounceDiagnostic(bodyText: string | null): string | null {
+  if (!bodyText) return null;
+  const replyLine = bodyText.match(/(?:系统应答|Diagnostic-Code)\s*[:：]\s*([^\r\n]+)/i);
+  if (replyLine?.[1]) return replyLine[1].trim().slice(0, 300);
+  const statusLine = bodyText.match(/\b55[0-4]\b[^\r\n]{0,200}/);
+  return statusLine ? statusLine[0].trim() : null;
+}
+
 /**
- * Handles a Gmail bounce notification: marks the failed recipient's
- * outreach_leads row as bounced (halting its sequence) and suppresses the
- * address so no future campaign emails it again. Does not create a
- * inbox contact for mailer-daemon itself — a bounce is not a reply.
+ * Handles a Gmail/IMAP bounce notification: marks the failed recipient's
+ * outreach_leads / crm_records row as bounced (halting its sequence) and
+ * suppresses the address so no future campaign emails it again. Does not create
+ * an inbox contact for mailer-daemon / Aliyun bounce bot itself.
  */
 export async function handleBounce(
   mailboxAddress: string,
@@ -136,7 +151,8 @@ export async function handleBounce(
   log: StepLogger,
   suppress: typeof suppressEmailOutreach,
 ) {
-  const failedEmail = parseBouncedRecipient(msg.bodyText);
+  const plainBody = msg.bodyText && looksLikeHtml(msg.bodyText) ? htmlToPlainText(msg.bodyText) : msg.bodyText;
+  const failedEmail = parseBouncedRecipient(plainBody);
   if (!failedEmail) {
     // Falls through to normal storage rather than being dropped: an
     // unreadable report is still something a human may want to see.
@@ -160,9 +176,16 @@ export async function handleBounce(
     return { leadId: null, skipped: true as const };
   }
 
+  if (isSenderAuthenticationBounce(plainBody)) {
+    log.warn(`Sender SPF/DKIM authentication rejection for ${failedEmail} on ${mailboxAddress} — skipping recipient suppression`);
+    return { leadId: null, skipped: true as const };
+  }
+
+  const diagnostic = extractBounceDiagnostic(plainBody);
+  const note = diagnostic ? `Bounced from ${mailboxAddress}: ${diagnostic}` : `Bounced from ${mailboxAddress}`;
   log.info(`Bounce detected for ${failedEmail} (mailbox ${mailboxAddress})`);
 
-  await suppress(failedEmail, "bounced", `Bounced from ${mailboxAddress}`, "bounced");
+  await suppress(failedEmail, "bounced", note, "bounced");
   log.info(`${failedEmail} marked bounced and added to suppression list`);
 
   return { leadId: null, skipped: false as const };
@@ -230,6 +253,23 @@ async function storeGmailMessageInMasterInbox(
       .returning({ id: inboxContacts.id });
     if (!lead) throw new Error("Master Inbox contact upsert did not return a row");
 
+    if (msg.messageId?.trim()) {
+      const [existing] = await tx
+        .select({ id: inboxMessages.id, contactId: inboxMessages.contactId })
+        .from(inboxMessages)
+        .innerJoin(inboxContacts, eq(inboxContacts.id, inboxMessages.contactId))
+        .where(
+          and(
+            inOrg(inboxContacts),
+            sql`${inboxMessages.raw}->>'messageId' = ${msg.messageId.trim()}`,
+          ),
+        )
+        .limit(1);
+      if (existing) {
+        return { leadId: existing.contactId, created: false };
+      }
+    }
+
     const [message] = await tx
       .insert(inboxMessages)
       .values({
@@ -239,7 +279,7 @@ async function storeGmailMessageInMasterInbox(
         subject: msg.subject,
         bodyText,
         fromEmail: msg.fromEmail,
-        toEmail: mailboxAddress,
+        toEmail: msg.toEmail || mailboxAddress,
         sentAt: repliedAt,
         raw: msg as unknown as object,
       })
@@ -249,8 +289,15 @@ async function storeGmailMessageInMasterInbox(
   });
 }
 
-async function findThreadConversationInDb(mailboxAddress: string, threadId: string): Promise<ThreadConversation | null> {
-  const [row] = await db
+async function findThreadConversationInDb(
+  mailboxAddress: string,
+  threadId: string,
+  inReplyTo?: string | null,
+): Promise<ThreadConversation | null> {
+  const candidates = Array.from(new Set([threadId, inReplyTo].filter((v): v is string => Boolean(v && v.trim()))));
+  if (candidates.length === 0) return null;
+
+  const [byThread] = await db
     .select({
       personId: crmConversations.personId,
       providerContactId: crmConversations.providerContactId,
@@ -262,10 +309,28 @@ async function findThreadConversationInDb(mailboxAddress: string, threadId: stri
       inOrg(crmConversations),
       eq(crmConversations.channel, "email"),
       eq(crmConversations.accountRef, mailboxAddress),
-      eq(crmConversations.providerThreadId, threadId),
+      or(...candidates.map((c) => eq(crmConversations.providerThreadId, c))),
     ))
     .limit(1);
-  return row ?? null;
+  if (byThread) return byThread;
+
+  const [byMessageId] = await db
+    .select({
+      personId: crmConversations.personId,
+      providerContactId: crmConversations.providerContactId,
+      personEmail: people.email,
+    })
+    .from(crmConversationMessages)
+    .innerJoin(crmConversations, eq(crmConversations.id, crmConversationMessages.conversationId))
+    .leftJoin(people, and(eq(people.id, crmConversations.personId), inOrg(people)))
+    .where(and(
+      inOrg(crmConversations),
+      eq(crmConversations.channel, "email"),
+      eq(crmConversations.accountRef, mailboxAddress),
+      or(...candidates.map((c) => eq(crmConversationMessages.providerMessageId, c))),
+    ))
+    .limit(1);
+  return byMessageId ?? null;
 }
 
 /**
@@ -288,6 +353,10 @@ async function attachToThreadConversation(
   if (!leadEmail) throw new Error("CRM conversation has no lead email to file the reply under");
   const inbox = await storeInMasterInbox(mailboxAddress, msg, bodyText, durableMessageKey, { email: leadEmail });
   log.info(inbox.created ? "Message stored in Master Inbox" : "Message already exists in Master Inbox");
+  if (!inbox.created) {
+    log.info(`Message ${msg.messageId ?? msg.gmailMessageId} is already stored in Master Inbox — skipping thread conversation attach`);
+    return { leadId: conversation.personId, skipped: true as const };
+  }
   if (!bodyText?.trim()) throw new Error("CRM cannot ingest an empty Gmail reply");
   const result = await ingest({
     personId: conversation.personId,
@@ -319,6 +388,7 @@ export async function ingestGmailReply(
   log: StepLogger,
   options: {
     isKnownOutreachRecipient?: (email: string) => Promise<boolean>;
+    isOtherOrgMailbox?: (email: string) => Promise<boolean>;
     storeInMasterInbox?: typeof storeGmailMessageInMasterInbox;
     suppress?: typeof suppressEmailOutreach;
     findThreadConversation?: (mailboxAddress: string, threadId: string) => Promise<ThreadConversation | null>;
@@ -329,15 +399,36 @@ export async function ingestGmailReply(
     log.warn("Message has no resolvable From address — skipping");
     return { leadId: null, skipped: true as const };
   }
-  if (looksLikeBounceNotification(msg)) {
-    const handled = await handleBounce(mailboxAddress, msg, log, options.suppress ?? suppressEmailOutreach);
-    if (handled) return handled;
-  }
   // Skip messages we sent ourselves (shouldn't normally show up under
   // INBOX/messageAdded, but the From-is-us case is cheap to guard anyway).
   if (msg.fromEmail === mailboxAddress.toLowerCase()) {
     log.info("Message is from this mailbox itself — skipping");
     return { leadId: null, skipped: true as const };
+  }
+
+  // If the message is explicitly addressed to another active mailbox in the same
+  // organization (e.g. multi-domain aliases or forwards on the same IMAP account),
+  // skip it here so the targeted mailbox handles it natively without duplicating.
+  const targetEmail = (msg.toEmail ?? "").trim().toLowerCase();
+  const mailboxLower = mailboxAddress.trim().toLowerCase();
+  if (targetEmail && targetEmail !== mailboxLower) {
+    const isOtherMailbox = options.isOtherOrgMailbox ?? (async (email: string) => {
+      const [other] = await db
+        .select({ id: mailboxes.id })
+        .from(mailboxes)
+        .where(and(inOrg(mailboxes), eq(mailboxes.emailAddress, email), eq(mailboxes.status, "connected")))
+        .limit(1);
+      return Boolean(other);
+    });
+    if (await isOtherMailbox(targetEmail)) {
+      log.info(`Message recipient ${targetEmail} belongs to another configured mailbox in this org — skipping sync under ${mailboxAddress}`);
+      return { leadId: null, skipped: true as const };
+    }
+  }
+
+  if (looksLikeBounceNotification(msg)) {
+    const handled = await handleBounce(mailboxAddress, msg, log, options.suppress ?? suppressEmailOutreach);
+    if (handled) return handled;
   }
 
   // Gmail's INBOX also receives Smartlead warm-up-pool exchanges. Ignore only
@@ -351,13 +442,22 @@ export async function ingestGmailReply(
   const bodyText = msg.bodyText && looksLikeHtml(msg.bodyText) ? htmlToPlainText(msg.bodyText) : msg.bodyText;
   const durableMessageKey = gmailInboundEventKey(mailboxAddress, msg.gmailMessageId);
   const isKnownOutreachRecipient = options.isKnownOutreachRecipient ?? (async (email: string) => {
-    const [recipient] = await db
+    const normalized = email.trim().toLowerCase();
+    const [campaignRecipient] = await db
       .select({ id: outreachLeads.id })
       .from(outreachLeads)
       .innerJoin(people, eq(outreachLeads.personId, people.id))
-      .where(and(leadsInOrg(), inOrg(people), eq(people.email, email)))
+      .where(and(leadsInOrg(), inOrg(people), sql`lower(${people.email}) = ${normalized}`))
       .limit(1);
-    return Boolean(recipient);
+    if (campaignRecipient) return true;
+
+    const [crmRecipient] = await db
+      .select({ id: crmRecords.id })
+      .from(crmRecords)
+      .innerJoin(people, eq(crmRecords.personId, people.id))
+      .where(and(inOrg(crmRecords), inOrg(people), sql`lower(${people.email}) = ${normalized}`))
+      .limit(1);
+    return Boolean(crmRecipient);
   });
   const knownOutreachRecipient = await isKnownOutreachRecipient(msg.fromEmail);
 
@@ -365,8 +465,10 @@ export async function ingestGmailReply(
   // looped in, a reply-all, or another emailed lead at the same company all
   // belong on the lead's existing thread. (A second lead's own conversation
   // would also collide with this thread id and be refused by the CRM.)
-  if (msg.threadId) {
-    const conversation = await (options.findThreadConversation ?? findThreadConversationInDb)(mailboxAddress, msg.threadId);
+  if (msg.threadId || msg.inReplyTo) {
+    const conversation = options.findThreadConversation
+      ? await options.findThreadConversation(mailboxAddress, msg.threadId ?? msg.inReplyTo ?? "")
+      : await findThreadConversationInDb(mailboxAddress, msg.threadId ?? "", msg.inReplyTo);
     if (conversation && conversation.personEmail?.toLowerCase() !== msg.fromEmail.toLowerCase()) {
       return attachToThreadConversation(
         mailboxAddress,
@@ -397,11 +499,6 @@ export async function ingestGmailReply(
   const { first, last } = splitName(msg.fromName);
   const repliedAt = msg.internalDate ?? new Date();
 
-  const [resolvedPerson] = await db
-    .select({ id: people.id })
-    .from(people)
-    .where(and(inOrg(people), eq(people.email, email)))
-    .limit(1);
   const inbox = await (options.storeInMasterInbox ?? storeGmailMessageInMasterInbox)(
     mailboxAddress,
     msg as InboundMessage & { fromEmail: string },
@@ -409,6 +506,16 @@ export async function ingestGmailReply(
     durableMessageKey,
   );
   log.info(inbox.created ? "Message stored in Master Inbox" : "Message already exists in Master Inbox");
+  if (!inbox.created) {
+    log.info(`Message ${msg.messageId ?? msg.gmailMessageId} is already stored in Master Inbox — skipping duplicate CRM work`);
+    return { leadId: inbox.leadId, skipped: true as const };
+  }
+
+  const [resolvedPerson] = await db
+    .select({ id: people.id })
+    .from(people)
+    .where(and(inOrg(people), sql`lower(${people.email}) = ${email.trim().toLowerCase()}`))
+    .limit(1);
   if (!resolvedPerson) {
     await quarantineCrmIdentity({
       channel: "email",
@@ -429,7 +536,7 @@ export async function ingestGmailReply(
     fullName: msg.fromName,
     source: "crm:gmail-inbound",
   }));
-  const result = await ingestCrmInboundReply({
+  const result = await (options.ingestCrm ?? ingestCrmInboundReply)({
     personId: person.id,
     channel: "email",
     accountRef: mailboxAddress,

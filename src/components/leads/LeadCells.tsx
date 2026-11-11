@@ -4,10 +4,10 @@
 import { useEffect, useRef, useState, type ComponentType, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { RiGlobalLine, RiLinkedinBoxFill, RiMailFill, RiPhoneFill, RiSparkling2Fill } from "@remixicon/react";
 import * as Tooltip from "@/components/alignui/tooltip";
-import { CHANNEL_META, CRM_CATEGORY_COLOR, HUE } from "@/components/analytics/theme";
-import { categoryColor } from "@/components/crm/crm-utils";
+import { CHANNEL_META, HUE } from "@/components/analytics/theme";
+import { LEAD_CRM_BADGE_STYLE } from "@/components/crm/crm-utils";
 import { cn } from "@/utils/cn";
-import { isFuture, linkedInPersonHref, shortDate, type Campaign, type PersonRow } from "./leadTypes";
+import { deriveLeadCrmDisplay, linkedInPersonHref, shortDate, type Campaign, type PersonRow } from "./leadTypes";
 
 /** Stops a click on a control inside a clickable row from also opening the row. */
 export const stop = (event: MouseEvent | KeyboardEvent) => event.stopPropagation();
@@ -121,10 +121,47 @@ const statusLabel = (status?: string) => (status ? status.charAt(0).toUpperCase(
 
 /**
  * One line: the channel icon and one campaign's name (an active one when
- * there is one), plus "+N" for the rest. The full list is in the tooltip.
+ * there is one), plus "+N" for the rest. When not in a campaign, surfaces
+ * direct CRM outreach activity (e.g., Direct email) so contacted/drafted
+ * rows don't show an empty dash.
  */
-export function CampaignSummary({ campaigns }: { campaigns: Campaign[] }) {
-  if (!campaigns.length) return <Empty label="Not in a campaign" />;
+export function CampaignSummary({ campaigns, crm }: { campaigns: Campaign[]; crm?: PersonRow["crm"] }) {
+  if (!campaigns.length) {
+    const draft = crm?.latestDraft ?? null;
+    const hasDirectOutreach = Boolean(crm && (crm.lastOutboundAt || (draft && draft.status !== "discarded")));
+    if (!hasDirectOutreach || !crm) return <Empty label="Not in a campaign" />;
+
+    const rawChannel = (crm.activeChannel || draft?.channel || "email").toLowerCase();
+    const channelKey = (rawChannel === "linkedin" || rawChannel === "whatsapp" ? rawChannel : "email") as keyof typeof CHANNEL_META;
+    const ChannelIcon = CHANNEL_META[channelKey].icon;
+    const label = channelKey === "linkedin" ? "Direct LinkedIn" : channelKey === "whatsapp" ? "Direct WhatsApp" : "Direct email";
+    const statusDetail = crm.lastOutboundAt
+      ? `Sent ${shortDate(crm.lastOutboundAt)}`
+      : draft?.status === "awaiting_review" && draft.autoSendAt
+        ? `Queued · ${shortDate(draft.autoSendAt)}`
+        : draft?.status === "awaiting_review"
+          ? "Draft ready"
+          : draft?.status
+            ? statusLabel(draft.status.replaceAll("_", " "))
+            : "CRM outreach";
+
+    return (
+      <Tooltip.Root>
+        <Tooltip.Trigger asChild>
+          <span tabIndex={0} className="flex min-w-0 max-w-full items-center gap-2 rounded outline-none focus-visible:ring-2 focus-visible:ring-stroke-strong-950">
+            <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-bg-white-0 ring-1 ring-stroke-soft-200" style={{ color: CHANNEL_META[channelKey].color }}>
+              <ChannelIcon className="size-3" />
+            </span>
+            <span className="truncate text-paragraph-sm text-text-sub-600">{label}</span>
+          </span>
+        </Tooltip.Trigger>
+        <Tooltip.Content size="medium" variant="light" side="bottom" align="start" className="max-w-72 p-2.5">
+          <p className="text-label-xs text-text-strong-950">{label} · {statusDetail}</p>
+          {draft?.subject && <p className="mt-1 truncate text-paragraph-xs text-text-sub-600">{draft.subject}</p>}
+        </Tooltip.Content>
+      </Tooltip.Root>
+    );
+  }
   const lead = campaigns.find(isActive) ?? campaigns[0];
   const rest = campaigns.length - 1;
   const channels = [...new Set(campaigns.map((campaign) => campaign.channel))];
@@ -168,35 +205,20 @@ export function CampaignSummary({ campaigns }: { campaigns: Campaign[] }) {
 
 // --------------------------------------------------------------------- CRM
 
-const humanize = (value: string) => {
-  const text = value.replaceAll("_", " ");
-  return text.charAt(0).toUpperCase() + text.slice(1);
-};
-
-/** Workflow states worth a word in the row; the rest (waiting, idle…) are the normal case. */
-const NOTABLE_STATE: Record<string, string> = { action_required: "Action required", paused: "Paused", error: "Error", classifying: "Classifying" };
-
 /**
- * One chip in the category's colour carrying the stage (sub-category) when
- * there is one, and a muted line only when it says something actionable.
+ * One chip in the category or outbound lifecycle stage's colour, plus a
+ * secondary muted line with send/schedule/due context.
  */
 export function CrmSummary({ crm }: { crm: PersonRow["crm"] }) {
   if (!crm) return <Empty label="No CRM record" />;
-  const key = crm.categoryKey ?? "unclassified";
-  const category = crm.categoryKey ? humanize(crm.categoryKey) : "Unclassified";
-  const dot = CRM_CATEGORY_COLOR[key as keyof typeof CRM_CATEGORY_COLOR] ?? CRM_CATEGORY_COLOR.unclassified;
-  const chip = crm.subcategory ? `${category} · ${crm.subcategory}` : category;
-  const state = NOTABLE_STATE[crm.workflowState];
-  // A future next action is news; a past one is already "Action required",
-  // and otherwise reads as due.
-  const due = crm.nextActionAt ? new Date(crm.nextActionAt) : null;
-  const next = !due ? null : isFuture(due) ? `Next action ${shortDate(due)}` : state ? null : `Due ${shortDate(due)}`;
-  const facts = [state, next].filter(Boolean).join(" · ");
+  const display = deriveLeadCrmDisplay(crm);
+  const style = LEAD_CRM_BADGE_STYLE[display.kind];
+  const facts = display.secondary;
   return (
     <div className="min-w-0">
-      <span title={chip} className={cn("inline-flex h-5 max-w-full items-center gap-1.5 rounded-md px-1.5 text-label-xs ring-1 ring-inset", categoryColor(crm.categoryKey).tone)}>
-        <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: dot }} />
-        <span className="truncate">{chip}</span>
+      <span title={display.chip} className={cn("inline-flex h-5 max-w-full items-center gap-1.5 rounded-md px-1.5 text-label-xs ring-1 ring-inset", style.tone)}>
+        <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: style.dot }} />
+        <span className="truncate">{display.chip}</span>
       </span>
       {(facts || crm.unacknowledgedAiChange) && (
         <p className="mt-1 flex min-w-0 items-center gap-1 text-paragraph-xs text-text-sub-600">

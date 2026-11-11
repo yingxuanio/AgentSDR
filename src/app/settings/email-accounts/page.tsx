@@ -1,6 +1,5 @@
 import AddMailboxButton from "@/components/outreach/AddMailboxButton";
 import MailboxesPageClient from "@/components/outreach/MailboxesPageClient";
-import { RequiresPlatform } from "@/components/settings/RequiresPlatform";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { requirePageOrgContext } from "@/lib/auth/context";
 import { runInOrganization } from "@/lib/tenancy/scope";
@@ -20,16 +19,10 @@ export default function EmailAccountsPage() {
   return (
     <SettingsPage
       title="Email accounts"
-      description="The mailboxes outreach campaigns send from."
-      actions={
-        <RequiresPlatform platform="google" fallback={null}>
-          <AddMailboxButton />
-        </RequiresPlatform>
-      }
+      description="The mailboxes outreach campaigns send from (supports direct SMTP / IMAP mailboxes such as Aliyun Enterprise Mail or Google Workspace)."
+      actions={<AddMailboxButton />}
     >
-      <RequiresPlatform platform="google">
-        <Mailboxes />
-      </RequiresPlatform>
+      <Mailboxes />
     </SettingsPage>
   );
 }

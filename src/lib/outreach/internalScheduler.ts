@@ -17,6 +17,7 @@
  * tick can't kill the loop or crash the process.
  */
 import { runSchedulerTick } from "./scheduler";
+import { syncAllImapMailboxes } from "./gmailSync";
 
 const TICK_INTERVAL_MS = Number(process.env.OUTREACH_TICK_INTERVAL_MS ?? 60_000);
 
@@ -31,12 +32,18 @@ async function safeTick() {
   }
   tickRunning = true;
   try {
-    const result = await runSchedulerTick();
+    const [result, imapSync] = await Promise.all([
+      runSchedulerTick(),
+      syncAllImapMailboxes().catch((err) => {
+        console.error("[outreach/internalScheduler] imap sync threw:", err);
+        return { checked: 0, synced: 0 };
+      }),
+    ]);
     tickCount += 1;
     // One-line heartbeat every 10 ticks (~10 min at the default interval)
     // instead of every tick, so logs stay readable but liveness is still visible.
-    if (tickCount % 10 === 0 || result.sent > 0 || result.failed > 0) {
-      console.log(`[outreach/internalScheduler] tick #${tickCount}:`, result);
+    if (tickCount % 10 === 0 || result.sent > 0 || result.failed > 0 || imapSync.synced > 0) {
+      console.log(`[outreach/internalScheduler] tick #${tickCount}:`, { ...result, imapSynced: imapSync.synced });
     }
   } catch (err) {
     console.error("[outreach/internalScheduler] tick threw:", err);

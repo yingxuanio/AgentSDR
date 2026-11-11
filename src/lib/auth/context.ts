@@ -8,6 +8,7 @@ import { runInOrganization } from "@/lib/tenancy/scope";
 import { roles, type OrgRole } from "./permissions";
 import { members, organizations } from "./schema";
 import { auth } from "./server";
+import { extractApiKeyFromHeaders, resolveApiKeyContext } from "./api-keys";
 
 /**
  * Who is asking, and for which organization — the one gate every request
@@ -63,6 +64,15 @@ function parseRoles(value: string): OrgRole[] {
 }
 
 async function resolve(headers: Headers): Promise<OrgContext> {
+  const apiKey = extractApiKeyFromHeaders(headers);
+  if (apiKey) {
+    const apiKeyCtx = await resolveApiKeyContext(apiKey);
+    if (!apiKeyCtx) {
+      throw new AuthContextError("Invalid or revoked API key", 401, "UNAUTHENTICATED");
+    }
+    return apiKeyCtx;
+  }
+
   const session = await auth.api.getSession({ headers });
   if (!session) throw new AuthContextError("Sign in to continue", 401, "UNAUTHENTICATED");
 

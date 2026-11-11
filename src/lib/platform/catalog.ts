@@ -16,7 +16,7 @@
 
 import { docsPageUrl } from "@/lib/support";
 
-export type PlatformKey = "unipile" | "google" | "r2" | "gologin" | "calcom" | "langfuse";
+export type PlatformKey = "unipile" | "google" | "smtp" | "r2" | "gologin" | "calcom" | "langfuse";
 
 /** The decrypted credential object stored for each platform. */
 export type PlatformCredentials = {
@@ -37,6 +37,20 @@ export type PlatformCredentials = {
     privateKey: string;
     /** Pub/Sub topic Gmail publishes new-mail notifications to. Empty means replies are not picked up. */
     gmailWatchTopic: string;
+  };
+  smtp: {
+    /** Outgoing SMTP server host, e.g. smtp.qiye.aliyun.com */
+    smtpHost: string;
+    /** Outgoing SMTP port, e.g. 465 (SSL/TLS) or 587 (STARTTLS) */
+    smtpPort: string;
+    /** Incoming IMAP server host, e.g. imap.qiye.aliyun.com */
+    imapHost: string;
+    /** Incoming IMAP port, e.g. 993 (SSL/TLS) */
+    imapPort: string;
+    /** Optional default mailbox email used for verification and fallback sending/sync */
+    defaultEmail: string;
+    /** Optional password / app-specific password for defaultEmail */
+    defaultPassword: string;
   };
   r2: {
     accountId: string;
@@ -71,6 +85,7 @@ export type PlatformField = {
   key: string;
   label: string;
   placeholder?: string;
+  defaultValue?: string;
   /** Where to find the value — written for someone who has never opened the provider's console. */
   help?: string;
   inputType: "text" | "password" | "textarea";
@@ -155,6 +170,79 @@ export const PLATFORM_INTEGRATIONS: readonly PlatformIntegration[] = [
         key: "notifySecret",
         label: "Webhook secret",
         help: "Leave empty: AgentSDR generates one and registers the webhooks with it. Fill it in only to keep a secret you already use.",
+        inputType: "password",
+        required: false,
+        secret: true,
+      },
+    ],
+  },
+  {
+    key: "smtp",
+    name: "SMTP / IMAP Mail Server",
+    description: "Sends email over SMTP and syncs replies in real time via IMAP IDLE + UID polling (supports Aliyun Enterprise Mail, Tencent Exmail, Zoho, or any standard mail server).",
+    enables: ["Email accounts", "Email campaigns and real-time IMAP reply sync"],
+    websiteUrl: "https://qiye.aliyun.com",
+    iconUrl: "/Integrations - Icon/smtp.svg",
+    setupSteps: [
+      "Enable SMTP and IMAP in your enterprise mailbox settings (for Aliyun Enterprise Mail: Account Settings → Third-party client login / Security → Generate client-specific password 客户端专用密码).",
+      "Confirm your outgoing SMTP server (default: smtp.qiye.aliyun.com, SSL port 465) and incoming IMAP server (default: imap.qiye.aliyun.com, SSL port 993).",
+      "Optionally fill in a default mailbox address and password below to test login right away, or connect each mailbox individually under Settings → Email → Accounts.",
+    ],
+    fields: [
+      {
+        key: "smtpHost",
+        label: "SMTP host",
+        placeholder: "smtp.qiye.aliyun.com",
+        defaultValue: "smtp.qiye.aliyun.com",
+        help: "Outgoing SMTP hostname (e.g. smtp.qiye.aliyun.com for Aliyun Enterprise Mail, smtp.exmail.qq.com for Tencent Exmail).",
+        inputType: "text",
+        required: true,
+        secret: false,
+      },
+      {
+        key: "smtpPort",
+        label: "SMTP port",
+        placeholder: "465",
+        defaultValue: "465",
+        help: "Use 465 for SSL/TLS (recommended) or 587 for STARTTLS.",
+        inputType: "text",
+        required: true,
+        secret: false,
+      },
+      {
+        key: "imapHost",
+        label: "IMAP host",
+        placeholder: "imap.qiye.aliyun.com",
+        defaultValue: "imap.qiye.aliyun.com",
+        help: "Incoming IMAP hostname (e.g. imap.qiye.aliyun.com for Aliyun Enterprise Mail). Used for real-time IMAP IDLE and incremental UID reply sync.",
+        inputType: "text",
+        required: true,
+        secret: false,
+      },
+      {
+        key: "imapPort",
+        label: "IMAP port",
+        placeholder: "993",
+        defaultValue: "993",
+        help: "Use 993 for IMAP over SSL/TLS.",
+        inputType: "text",
+        required: true,
+        secret: false,
+      },
+      {
+        key: "defaultEmail",
+        label: "Default / test mailbox email",
+        placeholder: "sdr@linktion.cn",
+        help: "Optional: if provided alongside the password below, AgentSDR verifies full SMTP & IMAP login immediately and uses this password automatically for this mailbox.",
+        inputType: "text",
+        required: false,
+        secret: false,
+      },
+      {
+        key: "defaultPassword",
+        label: "Default / test mailbox password",
+        placeholder: "Client-specific password (客户端专用密码)",
+        help: "Optional: password or app-specific password for the default mailbox above. Each mailbox in Email → Accounts can also store its own password.",
         inputType: "password",
         required: false,
         secret: true,
@@ -396,6 +484,7 @@ export const OPENROUTER_ICON_URL = "/Integrations - Icon/openrouter.svg";
  */
 export const PLATFORM_SETTINGS_HREF: Record<PlatformKey, string> = {
   google: "/settings/email-connection",
+  smtp: "/settings/email-connection",
   unipile: "/settings/linkedin-connection",
   r2: "/settings/whatsapp-connection",
   gologin: "/settings/whatsapp-connection",
@@ -406,6 +495,7 @@ export const PLATFORM_SETTINGS_HREF: Record<PlatformKey, string> = {
 /** Where that page sits in the Settings sidebar, for messages. */
 export const PLATFORM_SETTINGS_LABEL: Record<PlatformKey, string> = {
   google: "Settings → Email → Connection",
+  smtp: "Settings → Email → Connection",
   unipile: "Settings → LinkedIn → Connection",
   r2: "Settings → WhatsApp → Integrations",
   gologin: "Settings → WhatsApp → Integrations",

@@ -24,6 +24,8 @@ export type AutoFollowUpCandidate = {
   stepAwaitingReview: boolean;
   /** The draft was written for the record's current context. */
   contextCurrent: boolean;
+  /** Whether the draft is a one-off/direct send scheduled to go out in working hours */
+  isScheduledDirectSend?: boolean;
 };
 
 export type AutoFollowUpHandoffReason =
@@ -39,6 +41,15 @@ export type AutoFollowUpVerdict =
   | { verdict: "hand_to_rep"; reason: AutoFollowUpHandoffReason };
 
 export function autoFollowUpVerdict(candidate: AutoFollowUpCandidate, now: Date): AutoFollowUpVerdict {
+  if (candidate.isScheduledDirectSend) {
+    if (["paused", "closed", "error"].includes(candidate.workflowState)) return { verdict: "wait" };
+    if (now.getTime() - candidate.autoSendAt.getTime() > AUTO_FOLLOW_UP_HANDOFF_MS) {
+      return { verdict: "hand_to_rep", reason: "not_sent_in_48_hours" };
+    }
+    if (!candidate.contextCurrent) return { verdict: "wait" };
+    return { verdict: "send" };
+  }
+
   // Switched off after it was drafted: it becomes an ordinary draft to review.
   if (!candidate.sequenceAutoSend) return { verdict: "hand_to_rep", reason: "sequence_auto_send_off" };
   // Something else put the record on a person's desk; they send it with the rest.

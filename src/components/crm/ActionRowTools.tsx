@@ -59,7 +59,7 @@ export function CategoryDot({ categoryKey, className }: { categoryKey: string | 
  * still scans by outcome. The sequence and next draft follow whatever is
  * picked here, which is why it is worth having on the row at all.
  */
-export function ClassificationPicker({ categories, categoryKey, subcategoryId, subcategoryName, onChange, compact, quiet, disabled, className, title }: {
+export function ClassificationPicker({ categories, categoryKey, subcategoryId, subcategoryName, onChange, compact, quiet, disabled, className, title, placeholderLabel, placeholderTone, placeholderDot }: {
   categories: Data[];
   categoryKey: string | null;
   subcategoryId: string | null;
@@ -75,6 +75,10 @@ export function ClassificationPicker({ categories, categoryKey, subcategoryId, s
   className?: string;
   /** Overrides the compact badge's hover title — used where a second, different action (Move stage) sits next to it and the two need to read as distinct. */
   title?: string;
+  /** Pre-reply lifecycle label & tint (`Contacted`, `Draft ready`, `Queued`, etc.) shown when `categoryKey` is null so Leads & CRM stay unified. */
+  placeholderLabel?: string;
+  placeholderTone?: string;
+  placeholderDot?: string;
 }) {
   const value = subcategoryId || (categoryKey ? `category:${categoryKey}` : "");
   const save = (next: string) => {
@@ -92,7 +96,8 @@ export function ClassificationPicker({ categories, categoryKey, subcategoryId, s
     key: String(category.key),
     subcategories: asList<Data>(category.subcategories).filter((item) => item.active !== false),
   }));
-  const categoryLabel = categoryKey ? humanize(categoryKey) : "Unclassified";
+  const fallbackLabel = placeholderLabel || "Unclassified";
+  const categoryLabel = categoryKey ? humanize(categoryKey) : fallbackLabel;
 
   if (!compact) {
     return (
@@ -103,7 +108,7 @@ export function ClassificationPicker({ categories, categoryKey, subcategoryId, s
         onValueChange={(next) => save(next)}
       >
         <Select.Trigger aria-label="Classification" className={cn("max-w-56", className)}>
-          <Select.Value placeholder="Unclassified" />
+          <Select.Value placeholder={fallbackLabel} />
         </Select.Trigger>
         <Select.Content>
           {groups.length === 0 && categoryKey && <Select.Item value={value}>{categoryLabel}{subcategoryName ? ` · ${subcategoryName}` : ""}</Select.Item>}
@@ -120,9 +125,11 @@ export function ClassificationPicker({ categories, categoryKey, subcategoryId, s
   }
 
   const label = subcategoryName || categoryLabel;
-  const tone = quiet && !categoryKey
-    ? "bg-bg-white-0 text-text-sub-600 ring-0 outline-dashed outline-1 -outline-offset-1 outline-stroke-sub-300 hover:bg-bg-weak-50"
-    : categoryToneClass[categoryKey ?? ""] ?? "bg-bg-weak-50 text-text-sub-600 ring-stroke-soft-200";
+  const tone = !categoryKey && placeholderTone
+    ? placeholderTone
+    : quiet && !categoryKey
+      ? "bg-bg-white-0 text-text-sub-600 ring-0 outline-dashed outline-1 -outline-offset-1 outline-stroke-sub-300 hover:bg-bg-weak-50"
+      : categoryToneClass[categoryKey ?? ""] ?? "bg-bg-weak-50 text-text-sub-600 ring-stroke-soft-200";
   return (
     <Dropdown.Root>
       <Dropdown.Trigger asChild>
@@ -131,8 +138,9 @@ export function ClassificationPicker({ categories, categoryKey, subcategoryId, s
           disabled={disabled || groups.length === 0}
           aria-label={`Classification: ${label}. Change`}
           title={title ?? (subcategoryName ? `${categoryLabel} · ${subcategoryName}` : categoryLabel)}
-          className={cn("inline-flex h-6 max-w-full items-center gap-1 rounded-md pl-2 pr-1.5 text-label-xs ring-1 ring-inset transition", categoryKey && "hover:brightness-95", "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stroke-strong-950 disabled:opacity-60 data-[state=open]:ring-2 data-[state=open]:ring-stroke-strong-950", tone, className)}
+          className={cn("inline-flex h-6 max-w-full items-center gap-1.5 rounded-md pl-2 pr-1.5 text-label-xs ring-1 ring-inset transition", (categoryKey || placeholderTone) && "hover:brightness-95", "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stroke-strong-950 disabled:opacity-60 data-[state=open]:ring-2 data-[state=open]:ring-stroke-strong-950", tone, className)}
         >
+          {!categoryKey && placeholderDot && <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: placeholderDot }} />}
           <span className="truncate">{label}</span>
           <RiArrowDownSLine className="size-3.5 shrink-0 opacity-70" aria-hidden="true" />
         </button>
@@ -264,7 +272,11 @@ export function HoverPreview({ title, body, meta, children, className, onActivat
             {meta && <p className="shrink-0 text-paragraph-xs text-text-soft-400">{meta}</p>}
           </div>}
           <p className="max-h-72 overflow-y-auto whitespace-pre-wrap text-paragraph-sm leading-6 text-text-sub-600">{body}</p>
-          {actions && <div className="mt-3 flex items-center gap-2 border-t border-stroke-soft-200 pt-3" onClick={(event) => { event.stopPropagation(); setOpen(false); }}>{actions}</div>}
+          {actions && <div className="mt-3 flex items-center gap-2 border-t border-stroke-soft-200 pt-3" onClick={(event) => {
+            event.stopPropagation();
+            if ((event.target as HTMLElement).closest("[data-keep-preview], [aria-haspopup='menu']")) return;
+            setOpen(false);
+          }}>{actions}</div>}
         </Tooltip.Content>
       </Tooltip.Portal>
     </Tooltip.Root>
@@ -508,9 +520,92 @@ export function MoveStageDialog({ categories, categoryKey, subcategoryId, contex
 }
 
 /**
+ * Split send button: primary action sends immediately ("Send now"), while the
+ * chevron opens a dropdown to queue the draft in the account's weekday working
+ * window ("Queue in working hours").
+ */
+export function SendDraftButton({
+  disabled,
+  size = "md",
+  label = "Send now",
+  title,
+  ariaLabel,
+  onSendNow,
+  onQueueInWorkingHours,
+}: {
+  disabled?: boolean;
+  size?: "md" | "sm" | "xs" | "xxs";
+  label?: string;
+  title?: string;
+  ariaLabel?: string;
+  onSendNow: () => void;
+  onQueueInWorkingHours: () => void;
+}) {
+  const heightClass =
+    size === "xxs"
+      ? "h-6 text-label-xs"
+      : size === "xs"
+        ? "h-7 text-label-xs"
+        : size === "sm"
+          ? "h-8 text-label-sm"
+          : "h-9 text-label-sm";
+  const mainPadClass =
+    size === "xxs"
+      ? "gap-1 px-2"
+      : size === "xs"
+        ? "gap-1.5 px-2.5"
+        : "gap-2 px-3";
+  const triggerPadClass = size === "xxs" ? "px-1" : size === "xs" ? "px-1.5" : "px-2";
+  const iconSizeClass = size === "xxs" ? "size-3" : size === "xs" ? "size-3.5" : "size-4";
+  const sharedInteractive =
+    "inline-flex items-center justify-center bg-primary-base text-static-white transition hover:bg-primary-darker focus-visible:z-10 focus-visible:outline-none focus-visible:shadow-button-primary-focus disabled:pointer-events-none disabled:bg-bg-weak-50 disabled:text-text-disabled-300";
+
+  return (
+    <div className="inline-flex shrink-0 items-stretch" data-keep-preview onClick={(event) => event.stopPropagation()}>
+      <button
+        type="button"
+        disabled={disabled}
+        title={title ?? "Send immediately"}
+        aria-label={ariaLabel}
+        onClick={onSendNow}
+        className={cn(sharedInteractive, heightClass, mainPadClass, "rounded-l-lg")}
+      >
+        <RiSendPlaneLine className={iconSizeClass} aria-hidden="true" />
+        <span>{label}</span>
+      </button>
+      <Dropdown.Root>
+        <Dropdown.Trigger asChild>
+          <button
+            type="button"
+            disabled={disabled}
+            data-keep-preview
+            title="More send options"
+            aria-label="Send options"
+            className={cn(
+              sharedInteractive,
+              heightClass,
+              triggerPadClass,
+              "rounded-r-lg border-l border-white/25 disabled:border-stroke-soft-200",
+            )}
+          >
+            <RiArrowDownSLine className={iconSizeClass} aria-hidden="true" />
+          </button>
+        </Dropdown.Trigger>
+        <Dropdown.Content align="end" onClick={(event) => event.stopPropagation()}>
+          <Dropdown.Item onSelect={onQueueInWorkingHours}>
+            <Dropdown.ItemIcon as={RiTimerLine} className="text-text-sub-600" />
+            <span>Queue in working hours</span>
+          </Dropdown.Item>
+        </Dropdown.Content>
+      </Dropdown.Root>
+    </div>
+  );
+}
+
+/**
  * The reply composer, trimmed to what an inline row needs: the message being
  * answered on one side, the editable draft on the other, and the same
- * Approve & send / Save / Regenerate / Discard set the record page has.
+ * Send now / Save / Regenerate / Discard set the record page has.
  */
 export function InlineDraftEditor({ action, onMutate, onClose, busy }: { action: Data; onMutate: RowMutation; onClose: () => void; busy: boolean }) {
   const record = asObject(action.record);
@@ -563,9 +658,11 @@ export function InlineDraftEditor({ action, onMutate, onClose, busy }: { action:
           disabled={busy}
         />
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" disabled={!ready} className={primaryButtonClass} onClick={() => void onMutate(`/drafts/${draftId}/send`, payload, "POST", "Reply queued for sending")}>
-            <RiSendPlaneLine className="size-4" aria-hidden="true" />{dirty ? "Save & send" : "Approve & send"}
-          </button>
+          <SendDraftButton
+            disabled={!ready}
+            onSendNow={() => void onMutate(`/drafts/${draftId}/send`, payload, "POST", "Message sent")}
+            onQueueInWorkingHours={() => void onMutate(`/drafts/${draftId}/send`, { ...payload, scheduleInWorkingHours: true }, "POST", "Queued for working hours")}
+          />
           <button type="button" disabled={!draftId || !dirty || busy || !body.trim()} className={secondaryButtonClass} onClick={() => void onMutate(`/drafts/${draftId}`, payload, "PATCH", "Draft saved")}>
             <RiSaveLine className="size-4" aria-hidden="true" />Save
           </button>

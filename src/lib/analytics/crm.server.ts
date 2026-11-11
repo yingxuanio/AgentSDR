@@ -5,7 +5,7 @@ import { db } from "@/lib/db";
 import { crmActionGroupSql } from "@/lib/crm/actionGroups.server";
 import { currentOrganizationId } from "@/lib/tenancy/scope";
 import { ratio, toSeries, type AnalyticsRange, type BreakdownRow, type CrmCategory, type CrmSummary } from "./contract";
-import { inCurrentOrPreviousRange, inRange, localDay, num, type QueryLimiter } from "./server";
+import { inCurrentOrPreviousRange, inRange, isHumanInboundMessageSql, localDay, num, type QueryLimiter } from "./server";
 
 /** Runs each query through `limit`, keeping each query's own row type. */
 export function runQueries<const T extends readonly (() => PromiseLike<unknown>)[]>(
@@ -57,6 +57,7 @@ export async function getCrmSummary(range: AnalyticsRange, limit: QueryLimiter):
           ) cl ON true
           WHERE m.direction = 'inbound' AND ${inCurrentOrPreviousRange(sql`m.sent_at`, range)}
             AND m.conversation_id IN (SELECT id FROM crm_conversations WHERE organization_id = ${org})
+            AND ${isHumanInboundMessageSql()}
           GROUP BY 1, 2, 3`),
       () =>
         // Each inbound message, to the next outbound in its conversation;
@@ -74,6 +75,7 @@ export async function getCrmSummary(range: AnalyticsRange, limit: QueryLimiter):
             ) nxt
             WHERE m.direction = 'inbound' AND ${inCurrentOrPreviousRange(sql`m.sent_at`, range)}
               AND m.conversation_id IN (SELECT id FROM crm_conversations WHERE organization_id = ${org})
+              AND ${isHumanInboundMessageSql()}
           ) x
           GROUP BY x.cur`),
       () =>

@@ -11,7 +11,10 @@ import { fetchNewInboundMessages, isStaleHistoryCursorError, testMailboxConnecti
 import { isPlatformConnected } from "@/lib/platform/credentials";
 import { ingestGmailReply } from "./replyBridge";
 import { createStepLogger } from "@/lib/debugLog";
-import { currentOrganizationId, inOrg } from "@/lib/tenancy/scope";
+import { currentOrganizationId, inOrg, runInOrganization } from "@/lib/tenancy/scope";
+import { ensureImapIdleWatcher, resolveMailboxSmtpConfig } from "./smtpImap";
+
+const activeMailboxSyncs = new Set<string>();
 
 type SyncMailboxOptions = {
   fetch?: typeof fetchNewInboundMessages;
@@ -26,16 +29,30 @@ type SyncMailboxOptions = {
  */
 export async function syncMailboxInbox(mailboxId: string, options: SyncMailboxOptions = {}) {
   if (!options.fetch && !(await isPlatformConnected("google"))) {
-    console.log("[outreach/gmailSync] Google Workspace is not connected; inbox sync skipped");
-    return { synced: 0 };
+    console.log("[outreach/gmailSync] Email integration is not connected; inbox sync skipped");
+    return { synced: 0, fetched: 0 };
   }
+  if (activeMailboxSyncs.has(mailboxId)) {
+    return { synced: 0, fetched: 0 };
+  }
+  activeMailboxSyncs.add(mailboxId);
+  try {
+    return await syncMailboxInboxInner(mailboxId, options);
+  } finally {
+    activeMailboxSyncs.delete(mailboxId);
+  }
+}
+
+async function syncMailboxInboxInner(mailboxId: string, options: SyncMailboxOptions = {}) {
   const [mailbox] = await db.select().from(mailboxes).where(and(inOrg(mailboxes), eq(mailboxes.id, mailboxId))).limit(1);
-  if (!mailbox || mailbox.status !== "connected") return { synced: 0 };
-  if (!mailbox.lastHistoryId) return { synced: 0 }; // nothing to diff against yet
+  if (!mailbox || mailbox.status !== "connected") return { synced: 0, fetched: 0 };
+  const smtpConfig = !options.fetch ? await resolveMailboxSmtpConfig(mailbox.emailAddress) : null;
+  const cursor = mailbox.lastHistoryId || (smtpConfig ? "0" : null);
+  if (!cursor) return { synced: 0, fetched: 0 }; // nothing to diff against yet
 
   let syncResult;
   try {
-    syncResult = await (options.fetch ?? fetchNewInboundMessages)(mailbox.emailAddress, mailbox.lastHistoryId);
+    syncResult = await (options.fetch ?? fetchNewInboundMessages)(mailbox.emailAddress, cursor);
   } catch (err) {
     // A stale cursor (Gmail's history retention window passed, or the
     // stored id predates it) means every future push would fail identically
@@ -110,5 +127,49 @@ export async function syncMailboxInbox(mailboxId: string, options: SyncMailboxOp
     await db.update(mailboxes).set({ lastHistoryId: newHistoryId, lastError: null }).where(and(inOrg(mailboxes), eq(mailboxes.id, mailboxId)));
   }
 
-  return { synced };
+  return { synced, fetched: messages.length };
+}
+
+/**
+ * Ensures real-time IMAP IDLE listeners are active and performs a 60-second
+ * incremental UID catch-up sync across all connected SMTP/IMAP mailboxes.
+ */
+export async function syncAllImapMailboxes(): Promise<{ checked: number; synced: number }> {
+  const connectedRows = await db
+    .select({
+      id: mailboxes.id,
+      organizationId: mailboxes.organizationId,
+      emailAddress: mailboxes.emailAddress,
+    })
+    .from(mailboxes)
+    .where(eq(mailboxes.status, "connected"));
+
+  let checked = 0;
+  let totalSynced = 0;
+
+  for (const row of connectedRows) {
+    try {
+      await runInOrganization(row.organizationId, async () => {
+        const smtpConfig = await resolveMailboxSmtpConfig(row.emailAddress);
+        if (!smtpConfig) return;
+        checked += 1;
+
+        ensureImapIdleWatcher({
+          organizationId: row.organizationId,
+          mailboxId: row.id,
+          config: smtpConfig,
+          onNewMail: async (orgId, mId) => {
+            await runInOrganization(orgId, () => syncMailboxInbox(mId));
+          },
+        });
+
+        const res = await syncMailboxInbox(row.id);
+        totalSynced += res.synced;
+      });
+    } catch (err) {
+      console.error(`[outreach/gmailSync] IMAP sync error for ${row.emailAddress}:`, err);
+    }
+  }
+
+  return { checked, synced: totalSynced };
 }

@@ -11,6 +11,9 @@ export async function GET(
   try {
     return await withOrgContext(_req, async () => {
       const { providerKey } = await params;
+      if (providerKey === "all") {
+        return NextResponse.json({ connections: await listAiConnections() });
+      }
       if (!getAiProvider(providerKey)) {
         return NextResponse.json({ error: "unknown AI provider" }, { status: 404 });
       }

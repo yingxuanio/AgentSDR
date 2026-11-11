@@ -5,6 +5,8 @@ import { people } from "@/lib/leads/schema";
 import { connections as linkedinConnections, messages as linkedinMessages } from "@/lib/linkedin/schema";
 import { isPlatformConnected, isPlatformNotConnectedError } from "@/lib/platform/credentials";
 import { sendEmail } from "@/lib/outreach/gmail";
+import { mailboxes } from "@/lib/outreach/schema";
+import { isSameLocalDay } from "@/lib/outreach/workingHours";
 import { sendMessage as sendLinkedInMessage } from "@/services/unipile.service";
 import {
   deliverWhatsappFromCrm,
@@ -144,7 +146,10 @@ function providerErrorIsDefinite(error: unknown): boolean {
   // Nothing was submitted: the platform was never connected.
   if (error instanceof DefiniteCrmSendError || isPlatformNotConnectedError(error)) return true;
   if (!error || typeof error !== "object") return false;
-  const value = error as { code?: unknown; status?: unknown; response?: { status?: unknown } };
+  const value = error as { code?: unknown; status?: unknown; responseCode?: unknown; message?: unknown; response?: { status?: unknown } };
+  const smtpCode = Number(value.responseCode);
+  if (Number.isInteger(smtpCode) && smtpCode >= 550 && smtpCode <= 554) return true;
+  if (typeof value.message === "string" && /\b55[0-4]\s+RCPT\b|all recipients were rejected/i.test(value.message)) return true;
   const status = Number(value.status ?? value.response?.status ?? value.code);
   return Number.isInteger(status) && status >= 400 && status < 500 && ![408, 409, 425, 429].includes(status);
 }
@@ -154,8 +159,14 @@ export const sendThroughCrmProvider: CrmSendAdapter = async (input) => {
     if (!(await isPlatformConnected("google"))) throw new DefiniteCrmSendError("Google Workspace is not connected — connect it in Settings → Email → Connection");
     if (!input.recipientEmail) throw new DefiniteCrmSendError("The Person has no Email address");
     if (!input.subject) throw new DefiniteCrmSendError("Email subject is required");
+    const [mailbox] = await db
+      .select({ displayName: mailboxes.displayName })
+      .from(mailboxes)
+      .where(and(inOrg(mailboxes), eq(mailboxes.emailAddress, input.accountRef)))
+      .limit(1);
     const result = await sendEmail({
       from: input.accountRef,
+      fromName: mailbox?.displayName ?? null,
       to: [input.recipientEmail],
       cc: input.ccEmails?.length ? input.ccEmails : undefined,
       bcc: input.bccEmails?.length ? input.bccEmails : undefined,
@@ -558,6 +569,28 @@ async function finishSuccessfulSend(
       nextActionAt,
       updatedAt: now,
     }).where(eq(crmRecords.id, record.id));
+    if (!reconciliation && attempt.actorType !== "system" && prepared.request.channel === "email") {
+      const [mb] = await tx
+        .select({
+          id: mailboxes.id,
+          sendCounterResetAt: mailboxes.sendCounterResetAt,
+          workingHours: mailboxes.workingHours,
+        })
+        .from(mailboxes)
+        .where(and(inOrg(mailboxes), eq(mailboxes.emailAddress, prepared.request.accountRef)))
+        .limit(1);
+      if (mb) {
+        const sameDay = isSameLocalDay(mb.sendCounterResetAt, now, mb.workingHours.timezone);
+        await tx
+          .update(mailboxes)
+          .set(
+            sameDay
+              ? { todayEmailsSent: sql`${mailboxes.todayEmailsSent} + 1`, updatedAt: now }
+              : { todayEmailsSent: 1, sendCounterResetAt: now, updatedAt: now },
+          )
+          .where(eq(mailboxes.id, mb.id));
+      }
+    }
     await tx.update(crmClassifications).set({ acknowledgedAt: now, updatedAt: now })
       .where(and(
         eq(crmClassifications.crmRecordId, record.id),

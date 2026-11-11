@@ -13,7 +13,7 @@ import {
   type OverviewAnalytics,
 } from "./contract";
 import { getCrmSummary, runQueries, STAGE_CHANGE_EVENTS } from "./crm.server";
-import { createLimiter, inCurrentOrPreviousRange, inRange, num } from "./server";
+import { createLimiter, inCurrentOrPreviousRange, inRange, isHumanInboundMessageSql, num } from "./server";
 
 /**
  * The Overview: the CRM summary plus the outreach funnel and channel table.
@@ -52,6 +52,13 @@ function touches(range: AnalyticsRange) {
     WHERE m.direction = 'outbound' AND c.person_id IS NOT NULL
       AND c.account_id IN (SELECT id FROM whatsapp_accounts WHERE organization_id = ${org})
       AND NOT (m.raw IS NULL AND m.origin <> 'agentsdr' AND m.created_at - m.sent_at > interval '1 hour')
+      AND ${inCurrentOrPreviousRange(sql`m.sent_at`, range)}
+    UNION ALL
+    SELECT m.channel::text, m.person_id, m.sent_at
+    FROM crm_conversation_messages m
+    JOIN crm_conversations cv ON cv.id = m.conversation_id
+    WHERE cv.organization_id = ${org}
+      AND m.direction = 'outbound'
       AND ${inCurrentOrPreviousRange(sql`m.sent_at`, range)}`;
 }
 
@@ -80,6 +87,7 @@ export async function getOverviewAnalytics(range: AnalyticsRange): Promise<Overv
           FROM crm_conversation_messages m
           WHERE m.direction = 'inbound' AND ${inCurrentOrPreviousRange(sql`m.sent_at`, range)}
             AND m.conversation_id IN (SELECT id FROM crm_conversations WHERE organization_id = ${org})
+            AND ${isHumanInboundMessageSql()}
           GROUP BY GROUPING SETS ((1), (1, 2))`),
       () =>
         // Judgement calls: "positive"/"customer" look at the category a record

@@ -15,7 +15,7 @@ import type {
   ClassificationPersonProfile,
 } from "./types";
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 60_000;
 // Reasoning models think inside this budget before the call; see structuredCompletion.
 const DEFAULT_MAX_OUTPUT_TOKENS = 6_000;
 const MAX_TEXT_LENGTH = 100_000;
@@ -66,7 +66,7 @@ export type AcceptedDraftClassification = {
  * sees what it wrote and what the reviewer wants changed.
  */
 export type DraftRevisionRequest = {
-  previousDraft: { subject: string | null; bodyText: string };
+  previousDraft?: { subject: string | null; bodyText?: string | null } | null;
   reviewerFeedback: string;
 };
 
@@ -402,12 +402,18 @@ export function buildDraftPrompt(input: DraftPromptInput, templates: DraftTempla
   if (input.totalSteps && Number.isInteger(input.totalSteps) && input.totalSteps >= step.position) {
     snapshot.sequenceProgress = draftSequenceProgress(step, input.totalSteps, input.recentConversation);
   }
+  const previousBodyText = cleanOptionalText(input.revision?.previousDraft?.bodyText);
+  const previousSubject = cleanOptionalText(input.revision?.previousDraft?.subject);
   const revision = input.revision
     ? {
-        previousDraft: {
-          subject: cleanOptionalText(input.revision.previousDraft.subject),
-          bodyText: cleanRequiredText(input.revision.previousDraft.bodyText, "Previous CRM draft body"),
-        },
+        ...(previousBodyText || previousSubject
+          ? {
+              previousDraft: {
+                subject: previousSubject,
+                bodyText: previousBodyText,
+              },
+            }
+          : {}),
         reviewerFeedback: cleanRequiredText(input.revision.reviewerFeedback, "CRM draft reviewer feedback"),
       }
     : null;
@@ -422,10 +428,16 @@ export function buildDraftPrompt(input: DraftPromptInput, templates: DraftTempla
 
   return {
     systemPrompt: fillPrompt(templates["crm/draft-system"], { instructions: input.instructions?.trim() }),
-    userPrompt: fillPrompt(templates["crm/draft-user"], {
-      revision: Boolean(revision),
-      context_json: JSON.stringify(snapshot, null, 2),
-    }),
+    userPrompt:
+      revision && !previousBodyText
+        ? [
+            "Prepare the current CRM sequence-step draft from this server-assembled context. revisionRequest.reviewerFeedback is an instruction from the operator — follow it within the step and channel constraints:",
+            JSON.stringify(snapshot, null, 2),
+          ].join("\n\n")
+        : fillPrompt(templates["crm/draft-user"], {
+            revision: Boolean(revision),
+            context_json: JSON.stringify(snapshot, null, 2),
+          }),
     snapshot,
     jsonSchema: draftJsonSchema(input.channel),
   };

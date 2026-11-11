@@ -1,5 +1,6 @@
 import "server-only";
 
+import { extractApiKeyFromHeaders } from "@/lib/auth/api-keys";
 import { isAuthContextError, requireOrgContext, type OrgContext } from "@/lib/auth/context";
 
 export type CrmMutationRequest = {
@@ -100,7 +101,9 @@ export function assertSameOriginMutation(
  * error mapping keeps working.
  */
 export async function requireCrmMutationContext(request: CrmMutationRequest): Promise<OrgContext> {
-  assertSameOriginMutation(request);
+  if (!extractApiKeyFromHeaders(request.headers)) {
+    assertSameOriginMutation(request);
+  }
   try {
     return await requireOrgContext(request);
   } catch (error) {

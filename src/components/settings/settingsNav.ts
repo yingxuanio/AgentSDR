@@ -4,6 +4,7 @@ import {
   RiCpuLine,
   RiEqualizerLine,
   RiGroupLine,
+  RiKey2Line,
   RiTeamLine,
   RiLayoutColumnLine,
   RiLinkedinBoxLine,
@@ -38,6 +39,7 @@ export const SETTINGS_NAV: { label: string; items: SettingsNavItem[] }[] = [
       { href: "/settings/organization", label: "General", icon: RiBuilding2Line },
       { href: "/settings/members", label: "Members", icon: RiGroupLine },
       { href: "/settings/teams", label: "Teams", icon: RiTeamLine },
+      { href: "/settings/api-keys", label: "API keys", icon: RiKey2Line },
     ],
   },
   // Each channel is one row here; its pages — the connected accounts, the

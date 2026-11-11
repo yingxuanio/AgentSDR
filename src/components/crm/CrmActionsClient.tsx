@@ -34,8 +34,6 @@ import {
   RiQuestionLine,
   RiRefreshLine,
   RiReplyLine,
-  RiSendPlaneFill,
-  RiSendPlaneLine,
   RiSparklingFill,
   RiTimeLine,
   RiTimerLine,
@@ -54,10 +52,10 @@ import { EmptyState } from "@/components/page/EmptyState";
 import { PageHeader } from "@/components/page/PageHeader";
 import { cn } from "@/utils/cn";
 import { ContactAvatar } from "./ContactAvatar";
-import { ErrorState, primaryButtonClass, secondaryButtonClass } from "./CrmLayout";
+import { ErrorState, secondaryButtonClass } from "./CrmLayout";
 import { RowsSkeleton } from "./CrmSkeletons";
-import { CategoryDot, ClassificationPicker, HoverPreview, HoverPreviewProvider, InlineDraftEditor, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, humanize, type MoveStageBody, type RowMutation } from "./ActionRowTools";
-import { asList, asObject, CATEGORY_LABELS, crmFetch, displayName, errorMessage, formatDate, relativeDate, timeAgo } from "./crm-utils";
+import { CategoryDot, ClassificationPicker, HoverPreview, HoverPreviewProvider, InlineDraftEditor, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, SendDraftButton, humanize, type MoveStageBody, type RowMutation } from "./ActionRowTools";
+import { asList, asObject, CATEGORY_LABELS, crmFetch, deriveCrmRecordStageDisplay, displayName, errorMessage, extractLeadContext, formatDate, LEAD_CRM_BADGE_STYLE, relativeDate, timeAgo } from "./crm-utils";
 import { prefetchRecordWorkspace } from "./recordPrefetch";
 import { useRecordChanged } from "./recordEvents";
 import { publishRecordQueue, withdrawRecordQueue, type RecordQueue } from "./recordQueue";
@@ -502,8 +500,8 @@ export function ActionRows({ actions, categories, onActionsChange, pipeline, ref
           <Table.Row>
             <Table.Head scope="col" className="w-[19%] px-4">Contact</Table.Head>
             <Table.Head scope="col" className="w-[18%] px-4">Classification</Table.Head>
-            <Table.Head scope="col" className="w-[20%] px-4">Latest reply</Table.Head>
-            <Table.Head scope="col" className="w-[23%] px-4">Draft reply</Table.Head>
+            <Table.Head scope="col" className="w-[20%] px-4">Reply / Context</Table.Head>
+            <Table.Head scope="col" className="w-[23%] px-4">Draft</Table.Head>
             <Table.Head scope="col" className="w-[17%] px-3 text-right">{pipeline ? "Status" : "Due"}</Table.Head>
             <Table.Head scope="col" className="w-12 px-2"><span className="sr-only">More actions</span></Table.Head>
           </Table.Row>
@@ -561,7 +559,7 @@ type IconType = React.ComponentType<{ className?: string }>;
  */
 export const STAGE_META = {
   needs_action: { label: "Needs action", short: "Needs action", color: HUE.amber, badge: "orange", icon: RiFlashlightFill as IconType, detail: "A reply, draft or follow-up is due" },
-  waiting: { label: "Waiting on them", short: "Waiting", color: HUE.purple, badge: "purple", icon: RiHourglass2Fill as IconType, detail: "Replied to, or a follow-up is scheduled" },
+  waiting: { label: "Waiting on them", short: "Waiting", color: HUE.purple, badge: "purple", icon: RiHourglass2Fill as IconType, detail: "Outreach sent, replied to, or follow-up scheduled" },
   exhausted: { label: "Follow-ups exhausted", short: "Exhausted", color: MUTED_STRONG, badge: "gray", icon: RiArchiveStackFill as IconType, detail: "Every follow-up sent, no reply yet" },
 } as const;
 export type PipelineStage = keyof typeof STAGE_META;
@@ -607,6 +605,7 @@ function draftStateOf({ editable, draftFull, status, dnc, sendable, actionText }
     case "Classification review": return { label: "Needs classification", tone: "warning", icon: RiPriceTag3Line, hint: "Confirm the classification first" };
     case "No sequence assigned": return { label: "No sequence", tone: "neutral", icon: RiLinkUnlink, hint: "Nothing runs for this classification" };
     case "Delivery reconciliation": return { label: "Confirm delivery", tone: "warning", icon: RiQuestionLine, hint: "Open the record to confirm the last send" };
+    case "Outreach review":
     case "Reply review":
     case "Human review": return { label: "Needs a reply", tone: "info", icon: RiReplyLine, hint: "No draft yet — write one on the record" };
     default: return { label: actionText, tone: "neutral", icon: RiTimeLine };
@@ -676,12 +675,20 @@ export function describeAction(action: Action, categories: Data[], pipeline: boo
     : dueState === "follow_up" ? RiCalendarScheduleLine
     : RiTimeLine;
   const name = displayName({ ...action, ...record });
+  const personTitle = typeof person.title === "string" && person.title.trim() ? person.title.trim() : "";
   // The channel already shows on the avatar, so the line under the name says
   // which company this is — its domain, or the email's when no company is
   // linked — rather than repeating the address or profile URL.
   const companyDomain = company.domain ? String(company.domain)
     : person.email ? String(person.email).split("@")[1] ?? "" : "";
-  const companyLabel = companyDomain || (company.name ? String(company.name) : "");
+  const companyName = company.name ? String(company.name).trim() : "";
+  const companyLabel = [personTitle, companyName || companyDomain].filter(Boolean).join(" · ");
+  const leadContext = extractLeadContext(person, company);
+  const leadContextSummary = leadContext.leadReason || leadContext.verificationNote;
+  const leadContextFull = [
+    leadContext.leadReason ? `【录入理由与切入方案】\n${leadContext.leadReason}` : "",
+    leadContext.verificationNote ? `【联系人核验依据】\n${leadContext.verificationNote}` : "",
+  ].filter(Boolean).join("\n\n");
   const latestReplyFull = String(inbound.bodyText ?? action.latestInboundExcerpt ?? "").trim();
   const latestReply = String(action.latestInboundExcerpt ?? "").replace(/\s+/g, " ").trim();
   // The draft is the thing a reviewer actually opens the row for, so it
@@ -706,11 +713,23 @@ export function describeAction(action: Action, categories: Data[], pipeline: boo
   const sendableDraft = Boolean(editable) && !dnc && Number(editable?.expectedContextVersion) === Number(record.contextVersion);
   const actionText = actionType(action);
   const draftState = draftStateOf({ editable: Boolean(editable), draftFull, status: String(draft.status ?? ""), dnc, sendable: sendableDraft, actionText });
+  const crmStageDisplay = deriveCrmRecordStageDisplay(
+    {
+      record,
+      draft,
+      subcategoryName: subcategory.name ? String(subcategory.name) : null,
+      dnc,
+      bounced: Boolean(action.bounced),
+    },
+    now,
+  );
   return {
     id, href, record, person, activeRun, inbound, subcategory, classification, category, channel, stage,
     proposedCategoryKey, proposedSubcategoryId, proposedLabel, keepCategoryKey, keepSubcategoryId,
     dueLabel, dueDetail, dueColor, dueIcon, actionText, name, companyDomain, companyLabel,
+    leadContext, leadContextSummary, leadContextFull,
     latestReplyFull, latestReply, draft, draftFull, draftReply, editable, repliedAt, sequenceLabel, stepLabel, sendableDraft, draftState,
+    crmStageDisplay,
     avatarUrl: person.profilePictureUrl ? String(person.profilePictureUrl) : null,
   };
 }
@@ -759,6 +778,7 @@ export function ProposalInline({ label, busy, onAccept, onKeep, className }: { l
 function ClassificationCell({ row, categories, busy, onClassify }: { row: Row; categories: Data[]; busy: boolean; onClassify: (choice: { categoryKey: string; subcategoryId: string | null }) => Promise<void> }) {
   const categoryKey = row.category === "unclassified" ? null : row.category;
   const subcategoryName = row.subcategory.name ? String(row.subcategory.name) : null;
+  const stageStyle = LEAD_CRM_BADGE_STYLE[row.crmStageDisplay.kind];
   return <div className="min-w-0">
     <ClassificationPicker
       compact
@@ -767,8 +787,11 @@ function ClassificationCell({ row, categories, busy, onClassify }: { row: Row; c
       categoryKey={categoryKey}
       subcategoryId={row.record.subcategoryId ? String(row.record.subcategoryId) : null}
       subcategoryName={subcategoryName}
+      placeholderLabel={row.crmStageDisplay.chip}
+      placeholderTone={stageStyle.tone}
+      placeholderDot={stageStyle.dot}
       disabled={busy}
-      title="Fix classification — the AI misread this reply"
+      title={categoryKey ? "Fix classification — the AI misread this reply" : `${row.crmStageDisplay.chip} — click to set category manually`}
       onChange={(choice) => void onClassify(choice)}
     />
     {row.classification.status === "proposed" && <ProposalInline
@@ -789,15 +812,36 @@ function ChannelMark({ channel, className }: { channel: string; className?: stri
   return <span className={cn("flex shrink-0", className)} style={{ color: meta.color }} title={meta.label}><Icon className="size-3.5" aria-hidden="true" /></span>;
 }
 
-/** Their last message as a quote, with where and when it arrived underneath. */
+/**
+ * Reply / Context summary:
+ * 1. If an inbound reply arrived (`row.latestReply` or `row.record.lastInboundAt`),
+ *    renders the prospect's latest reply quote with channel + arrival time.
+ * 2. Before any reply, clearly marks "No reply yet" and — when prospecting notes
+ *    exist — previews the lead's entry rationale (`录入依据`) so hovering expands
+ *    the exact same prospecting & verification note without semantic ambiguity.
+ */
 function ReplyQuote({ row, lines = 1 }: { row: Row; lines?: 1 | 2 }) {
-  return <div className="min-w-0 border-l-2 border-stroke-soft-200 pl-2.5">
-    <p className={cn("text-paragraph-sm", lines === 1 ? "truncate" : "line-clamp-2", row.latestReply ? "text-text-strong-950" : "italic text-text-soft-400")}>{row.latestReply || "No message text"}</p>
-    <p className="mt-0.5 flex items-center gap-1.5 text-paragraph-xs text-text-sub-600">
-      <ChannelMark channel={row.channel} />
-      <span title={formatDate(row.repliedAt)}>{timeAgo(row.repliedAt)}</span>
-    </p>
-  </div>;
+  const hasInbound = Boolean(row.latestReply || row.record.lastInboundAt);
+  if (hasInbound) {
+    return <div className="min-w-0 border-l-2 border-success-base/50 pl-2.5">
+      <p className={cn("text-paragraph-sm", lines === 1 ? "truncate" : "line-clamp-2", row.latestReply ? "text-text-strong-950" : "italic text-text-soft-400")}>{row.latestReply || "Inbound message (no body text)"}</p>
+      <p className="mt-0.5 flex items-center gap-1.5 text-paragraph-xs text-text-sub-600">
+        <ChannelMark channel={row.channel} />
+        <span>Replied {timeAgo(row.inbound.sentAt ?? row.record.lastInboundAt ?? row.repliedAt)}</span>
+      </p>
+    </div>;
+  }
+  if (row.leadContextSummary) {
+    const contextMeta = [row.leadContext.companyCode, row.leadContext.region].filter(Boolean).join(" · ");
+    return <div className="min-w-0 border-l-2 border-primary-alpha-24 pl-2.5">
+      <p className={cn("text-paragraph-sm text-text-sub-600", lines === 1 ? "truncate" : "line-clamp-2")}>{row.leadContextSummary}</p>
+      <p className="mt-0.5 flex items-center gap-1.5 text-paragraph-xs text-text-soft-400">
+        <span className="shrink-0 rounded bg-bg-weak-50 px-1 py-px text-[11px] text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200">未回复 · 录入依据</span>
+        {contextMeta && <span className="truncate">{contextMeta}</span>}
+      </p>
+    </div>;
+  }
+  return <span className="text-paragraph-sm text-text-soft-400">No reply yet</span>;
 }
 
 /** The draft's state as coloured icon + label. */
@@ -845,10 +889,18 @@ function DueChip({ row, align = "end" }: { row: Row; align?: "start" | "end" }) 
   </div>;
 }
 
-function sendDraft(row: Row, onMutate: RowMutation) {
+function sendDraft(row: Row, onMutate: RowMutation, scheduleInWorkingHours = false) {
   const editable = row.editable;
   if (!editable) return;
-  void onMutate(`/drafts/${String(editable.id)}/send`, { revision: Number(editable.revision ?? 1) }, "POST", "Reply queued for sending");
+  const payload = scheduleInWorkingHours
+    ? { revision: Number(editable.revision ?? 1), scheduleInWorkingHours: true }
+    : { revision: Number(editable.revision ?? 1) };
+  void onMutate(
+    `/drafts/${String(editable.id)}/send`,
+    payload,
+    "POST",
+    scheduleInWorkingHours ? "Queued for working hours" : "Message sent",
+  );
 }
 
 function ActionRow({ action, categories, busy, editing, pipeline, now, onOpen, onToggleEdit, onMutate, onClassify }: {
@@ -903,7 +955,11 @@ function ActionRow({ action, categories, busy, editing, pipeline, now, onOpen, o
         <ClassificationCell row={row} categories={categories} busy={busy} onClassify={onClassify} />
       </Table.Cell>
       <Table.Cell className="px-4 py-3">
-        <HoverPreview title={String(row.inbound.subject ?? "").trim() || row.name} meta={formatDate(row.inbound.sentAt ?? row.repliedAt)} body={row.latestReplyFull}>
+        <HoverPreview
+          title={row.latestReplyFull ? (String(row.inbound.subject ?? "").trim() || "Latest inbound reply") : "录入依据与核验来源（尚未收到客户回复）"}
+          meta={row.latestReplyFull ? formatDate(row.inbound.sentAt ?? row.repliedAt) : [row.leadContext.companyCode, row.leadContext.region].filter(Boolean).join(" · ")}
+          body={row.latestReplyFull || row.leadContextFull}
+        >
           <ReplyQuote row={row} />
         </HoverPreview>
       </Table.Cell>
@@ -920,14 +976,27 @@ function ActionRow({ action, categories, busy, editing, pipeline, now, onOpen, o
           onActivate={editable ? onToggleEdit : undefined}
           actions={editable && <>
             <button type="button" className={cn(secondaryButtonClass, "h-8")} onClick={onToggleEdit}><RiPencilLine className="size-4" aria-hidden="true" />{editing ? "Close editor" : "Edit"}</button>
-            <button type="button" className={cn(primaryButtonClass, "h-8")} disabled={!sendable} onClick={() => sendDraft(row, onMutate)} title={sendTitle}><RiSendPlaneLine className="size-4" aria-hidden="true" />Send</button>
+            <SendDraftButton
+              size="sm"
+              disabled={!sendable}
+              title={sendTitle}
+              onSendNow={() => sendDraft(row, onMutate, false)}
+              onQueueInWorkingHours={() => sendDraft(row, onMutate, true)}
+            />
           </>}
         >
           <DraftSummary row={row} />
         </HoverPreview>
-        {editable && !editing && <div data-row-tools className="pointer-events-none absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1 rounded-lg bg-bg-white-0 p-1 opacity-0 shadow-regular-md ring-1 ring-inset ring-stroke-soft-200 transition-opacity group-hover/row:pointer-events-auto group-hover/row:opacity-100 group-focus-within/row:pointer-events-auto group-focus-within/row:opacity-100">
+        {editable && !editing && <div data-row-tools className="pointer-events-none absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1 rounded-lg bg-bg-white-0 p-1 opacity-0 shadow-regular-md ring-1 ring-inset ring-stroke-soft-200 transition-opacity group-hover/row:pointer-events-auto group-hover/row:opacity-100 group-focus-within/row:pointer-events-auto group-focus-within/row:opacity-100 has-[[data-state=open]]:pointer-events-auto has-[[data-state=open]]:opacity-100">
           <Button.Root variant="neutral" mode="ghost" size="xxsmall" onClick={onToggleEdit} aria-label={`Edit the draft to ${row.name}`} title="Edit the draft here"><Button.Icon as={RiPencilLine} /></Button.Root>
-          <Button.Root variant="primary" mode="filled" size="xxsmall" disabled={!sendable} onClick={() => sendDraft(row, onMutate)} aria-label={`Send the draft to ${row.name}`} title={sendTitle}><Button.Icon as={RiSendPlaneFill} />Send</Button.Root>
+          <SendDraftButton
+            size="xs"
+            disabled={!sendable}
+            title={sendTitle}
+            ariaLabel={`Send the draft to ${row.name} now`}
+            onSendNow={() => sendDraft(row, onMutate, false)}
+            onQueueInWorkingHours={() => sendDraft(row, onMutate, true)}
+          />
         </div>}
       </Table.Cell>
       <Table.Cell className="px-3 py-3 text-right">
@@ -1071,17 +1140,24 @@ export function ActionCard({ action, categories, now, busy, onOpen, onMutate, on
     </div>
 
     <div className="mt-3 flex flex-wrap items-center gap-1.5" data-row-tools>
-      <ClassificationPicker
-        compact
-        quiet
-        categories={categories}
-        categoryKey={row.category === "unclassified" ? null : row.category}
-        subcategoryId={record.subcategoryId ? String(record.subcategoryId) : null}
-        subcategoryName={row.subcategory.name ? String(row.subcategory.name) : null}
-        disabled={busy}
-        title="Fix classification — the AI misread this reply"
-        onChange={(choice) => void onClassify(choice)}
-      />
+      {(() => {
+        const cardCategoryKey = row.category === "unclassified" ? null : row.category;
+        const stageStyle = LEAD_CRM_BADGE_STYLE[row.crmStageDisplay.kind];
+        return <ClassificationPicker
+          compact
+          quiet
+          categories={categories}
+          categoryKey={cardCategoryKey}
+          subcategoryId={record.subcategoryId ? String(record.subcategoryId) : null}
+          subcategoryName={row.subcategory.name ? String(row.subcategory.name) : null}
+          placeholderLabel={row.crmStageDisplay.chip}
+          placeholderTone={stageStyle.tone}
+          placeholderDot={stageStyle.dot}
+          disabled={busy}
+          title={cardCategoryKey ? "Fix classification — the AI misread this reply" : `${row.crmStageDisplay.chip} — click to set category manually`}
+          onChange={(choice) => void onClassify(choice)}
+        />;
+      })()}
       {row.classification.status === "proposed" && <ProposalInline
         label={row.proposedLabel}
         busy={busy}
@@ -1090,28 +1166,46 @@ export function ActionCard({ action, categories, now, busy, onOpen, onMutate, on
       />}
     </div>
 
-    {row.latestReply && <HoverPreview title={String(row.inbound.subject ?? "").trim() || row.name} meta={formatDate(row.inbound.sentAt ?? row.repliedAt)} body={row.latestReplyFull} className="mt-3">
+    {(row.latestReply || row.leadContextSummary) && <HoverPreview
+      title={row.latestReplyFull ? (String(row.inbound.subject ?? "").trim() || "Latest inbound reply") : "录入依据与核验来源（尚未收到客户回复）"}
+      meta={row.latestReplyFull ? formatDate(row.inbound.sentAt ?? row.repliedAt) : [row.leadContext.companyCode, row.leadContext.region].filter(Boolean).join(" · ")}
+      body={row.latestReplyFull || row.leadContextFull}
+      className="mt-3"
+    >
       <ReplyQuote row={row} lines={2} />
     </HoverPreview>}
 
     {row.draftReply ? <div className="mt-3 rounded-lg bg-bg-weak-50 p-2.5 ring-1 ring-inset ring-stroke-soft-200">
       <HoverPreview
-        title={String(row.draft.subject ?? "").trim() || "Draft reply"}
+        title={String(row.draft.subject ?? "").trim() || "Draft"}
         meta={row.draftState.label}
         body={row.draftFull}
         onActivate={onOpen}
         actions={editable && <>
           <Link href={href} className={cn(secondaryButtonClass, "h-8")}>Open to edit</Link>
-          <button type="button" className={cn(primaryButtonClass, "h-8")} disabled={!sendable} onClick={() => sendDraft(row, onMutate)} title={sendTitle}><RiSendPlaneLine className="size-4" aria-hidden="true" />Send</button>
+          <SendDraftButton
+            size="sm"
+            disabled={!sendable}
+            title={sendTitle}
+            onSendNow={() => sendDraft(row, onMutate, false)}
+            onQueueInWorkingHours={() => sendDraft(row, onMutate, true)}
+          />
         </>}
       >
         <p className="line-clamp-2 text-paragraph-xs text-text-sub-600">{row.draftReply}</p>
       </HoverPreview>
       <div className="mt-2 flex items-center justify-between gap-2">
         <DraftStateLabel state={row.draftState} className="min-w-0 truncate" />
-        {editable && <div data-row-tools className="flex shrink-0 items-center gap-1">
+        {editable && <div data-row-tools className="flex shrink-0 items-center gap-1.5">
           <Button.Root variant="neutral" mode="stroke" size="xxsmall" asChild><Link href={href} aria-label={`Open ${row.name} to edit the draft`}><Button.Icon as={RiPencilLine} />Edit</Link></Button.Root>
-          <Button.Root variant="primary" mode="filled" size="xxsmall" disabled={!sendable} onClick={() => sendDraft(row, onMutate)} aria-label={`Send the draft to ${row.name}`} title={sendTitle}><Button.Icon as={RiSendPlaneFill} />Send</Button.Root>
+          <SendDraftButton
+            size="xxs"
+            disabled={!sendable}
+            title={sendTitle}
+            ariaLabel={`Send the draft to ${row.name}`}
+            onSendNow={() => sendDraft(row, onMutate, false)}
+            onQueueInWorkingHours={() => sendDraft(row, onMutate, true)}
+          />
         </div>}
       </div>
     </div>
@@ -1122,7 +1216,7 @@ export function ActionCard({ action, categories, now, busy, onOpen, onMutate, on
         <Badge.Icon as={chipRow.dueIcon} className="-ml-0.5 mr-0 size-3.5" /><span className="truncate">{chipRow.dueLabel === "—" ? "Nothing due" : chipRow.dueLabel}</span>
       </Badge.Root>
       {/* The quote above already says when they replied; this is the when of the chip. */}
-      <span className="shrink-0 text-paragraph-xs tabular-nums text-text-sub-600" title={formatDate(row.repliedAt)}>{row.dueDetail && row.dueDetail !== "—" ? row.dueDetail : row.latestReply ? "" : timeAgo(row.repliedAt)}</span>
+      <span className="shrink-0 text-paragraph-xs tabular-nums text-text-sub-600" title={formatDate(row.record.lastOutboundAt ?? row.repliedAt)}>{row.dueDetail && row.dueDetail !== "—" ? row.dueDetail : row.latestReply ? "" : timeAgo(row.record.lastOutboundAt ?? row.repliedAt)}</span>
     </div>
     {row.sequenceLabel && <p className="mt-1.5 truncate text-paragraph-xs text-text-soft-400" title={row.sequenceLabel}>{row.sequenceLabel}</p>}
   </article>;

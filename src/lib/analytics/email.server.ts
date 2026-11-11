@@ -11,7 +11,7 @@ import {
   type AnalyticsRange,
   type EmailAnalytics,
 } from "./contract";
-import { inCurrentOrPreviousRange, inPreviousRange, inRange, localDay, num, runLimited } from "./server";
+import { inCurrentOrPreviousRange, inPreviousRange, inRange, isHumanInboundMessageSql, localDay, num, runLimited } from "./server";
 
 const CAMPAIGN_ROW_CAP = 25;
 
@@ -70,8 +70,10 @@ export async function getEmailAnalytics(range: AnalyticsRange): Promise<EmailAna
   /** Outreach leads of this organization, reached through their campaign. */
   const orgLeadIds = sql`(SELECT ol.id FROM outreach_leads ol JOIN outreach_campaigns oc ON oc.id = ol.campaign_id WHERE oc.organization_id = ${org})`;
   const sentDay = localDay(sql`e.sent_at`, range);
+  const crmSentDay = localDay(sql`m.sent_at`, range);
   const msgDay = localDay(sql`m.sent_at`, range);
   const campaignDay = localDay(sql`e.sent_at`, range);
+  const directCampaignId = "__direct_crm_email__";
 
   const results = await runLimited<unknown>(
     [
@@ -80,18 +82,69 @@ export async function getEmailAnalytics(range: AnalyticsRange): Promise<EmailAna
           SELECT d, GROUPING(d) = 1 AS total,
             count(*) FILTER (WHERE status = 'sent' AND ${inRange(sql`sent_at`, range)})::int AS sent,
             count(*) FILTER (WHERE status = 'sent' AND ${inPreviousRange(sql`sent_at`, range)})::int AS sent_prev,
-            count(*) FILTER (WHERE status = 'sent' AND step_number = 1 AND ${inRange(sql`sent_at`, range)})::int AS first_touch,
-            count(*) FILTER (WHERE status = 'sent' AND step_number > 1 AND ${inRange(sql`sent_at`, range)})::int AS follow_up,
-            count(DISTINCT lead_id) FILTER (WHERE status = 'sent' AND step_number = 1 AND ${inRange(sql`sent_at`, range)})::int AS contacted,
-            count(DISTINCT lead_id) FILTER (WHERE status = 'sent' AND step_number = 1 AND ${inPreviousRange(sql`sent_at`, range)})::int AS contacted_prev,
+            count(*) FILTER (WHERE status = 'sent' AND is_first AND ${inRange(sql`sent_at`, range)})::int AS first_touch,
+            count(*) FILTER (WHERE status = 'sent' AND NOT is_first AND ${inRange(sql`sent_at`, range)})::int AS follow_up,
+            count(DISTINCT contact_key) FILTER (WHERE status = 'sent' AND is_first AND ${inRange(sql`sent_at`, range)})::int AS contacted,
+            count(DISTINCT contact_key) FILTER (WHERE status = 'sent' AND is_first AND ${inPreviousRange(sql`sent_at`, range)})::int AS contacted_prev,
             count(*) FILTER (WHERE status = 'failed' AND ${inRange(sql`created_at`, range)})::int AS failed
           FROM (
-            SELECT e.status, e.step_number, e.lead_id, e.sent_at, e.created_at,
+            SELECT
+              e.status::text AS status,
+              (e.step_number = 1) AS is_first,
+              coalesce(l.person_id::text, 'lead:' || e.lead_id::text) AS contact_key,
+              e.sent_at,
+              e.created_at,
               CASE WHEN e.status = 'sent' THEN ${sentDay} END AS d
             FROM outreach_emails e
+            JOIN outreach_leads l ON l.id = e.lead_id
             WHERE ((e.status = 'sent' AND ${inCurrentOrPreviousRange(sql`e.sent_at`, range)})
                OR (e.status = 'failed' AND ${inRange(sql`e.created_at`, range)})
             ) AND e.lead_id IN ${orgLeadIds}
+            UNION ALL
+            SELECT
+              'sent'::text AS status,
+              NOT EXISTS (
+                SELECT 1
+                FROM crm_conversation_messages prev
+                JOIN crm_conversations pcv ON pcv.id = prev.conversation_id
+                WHERE pcv.organization_id = ${org}
+                  AND prev.person_id = m.person_id
+                  AND prev.channel = 'email'
+                  AND prev.direction = 'outbound'
+                  AND (prev.sent_at < m.sent_at OR (prev.sent_at = m.sent_at AND prev.id < m.id))
+              ) AS is_first,
+              m.person_id::text AS contact_key,
+              m.sent_at,
+              m.created_at,
+              ${crmSentDay} AS d
+            FROM crm_conversation_messages m
+            JOIN crm_conversations cv ON cv.id = m.conversation_id
+            WHERE cv.organization_id = ${org}
+              AND m.channel = 'email'
+              AND m.direction = 'outbound'
+              AND ${inCurrentOrPreviousRange(sql`m.sent_at`, range)}
+              AND (
+                m.provider_message_id IS NULL
+                OR NOT EXISTS (
+                  SELECT 1 FROM outreach_emails oe
+                  WHERE oe.message_id = m.provider_message_id AND oe.status = 'sent'
+                )
+              )
+            UNION ALL
+            SELECT
+              'failed'::text AS status,
+              false AS is_first,
+              r.person_id::text AS contact_key,
+              NULL::timestamptz AS sent_at,
+              sa.created_at,
+              NULL::text AS d
+            FROM crm_send_attempts sa
+            JOIN crm_drafts d ON d.id = sa.draft_id
+            JOIN crm_records r ON r.id = d.crm_record_id
+            WHERE r.organization_id = ${org}
+              AND d.channel = 'email'
+              AND (sa.status IN ('failed', 'delivery_uncertain') OR (sa.status = 'reconciled' AND sa.provider_message_id IS NULL))
+              AND ${inRange(sql`sa.created_at`, range)}
           ) t
           GROUP BY GROUPING SETS ((), (d))
         `),
@@ -107,23 +160,39 @@ export async function getEmailAnalytics(range: AnalyticsRange): Promise<EmailAna
             WHERE m.direction = 'inbound' AND m.channel = 'email'
               AND ${inCurrentOrPreviousRange(sql`m.sent_at`, range)}
               AND m.conversation_id IN (SELECT id FROM crm_conversations WHERE organization_id = ${org})
-              AND EXISTS (SELECT 1 FROM outreach_leads l WHERE l.person_id = m.person_id AND l.id IN ${orgLeadIds})
+              AND ${isHumanInboundMessageSql()}
           ) t
           GROUP BY GROUPING SETS ((), (d))
         `),
       () =>
         db.execute<SuppressionRow>(sql`
+          WITH bounce_events AS (
+            SELECT lower(email) AS addr, created_at
+            FROM outreach_suppression_list
+            WHERE organization_id = ${org} AND reason = 'bounced' AND ${inCurrentOrPreviousRange(sql`created_at`, range)}
+            UNION ALL
+            SELECT lower(coalesce(p.email, r.person_id::text)) AS addr, sa.created_at
+            FROM crm_send_attempts sa
+            JOIN crm_drafts d ON d.id = sa.draft_id
+            JOIN crm_records r ON r.id = d.crm_record_id
+            JOIN people p ON p.id = r.person_id
+            WHERE r.organization_id = ${org}
+              AND d.channel = 'email'
+              AND (sa.status IN ('failed', 'delivery_uncertain') OR (sa.status = 'reconciled' AND sa.provider_message_id IS NULL))
+              AND coalesce(sa.error, '') ~* '(55[0-9]|5\\.[0-9]\\.[0-9]|rejected|does not exist|doesn''t exist|bounced|user unknown)'
+              AND ${inCurrentOrPreviousRange(sql`sa.created_at`, range)}
+          )
           SELECT
-            count(*) FILTER (WHERE reason = 'bounced' AND ${inRange(sql`created_at`, range)})::int AS bounced,
-            count(*) FILTER (WHERE reason = 'bounced' AND ${inPreviousRange(sql`created_at`, range)})::int AS bounced_prev,
+            (SELECT count(DISTINCT addr) FROM bounce_events WHERE ${inRange(sql`created_at`, range)})::int AS bounced,
+            (SELECT count(DISTINCT addr) FROM bounce_events WHERE ${inPreviousRange(sql`created_at`, range)})::int AS bounced_prev,
             count(*) FILTER (WHERE reason = 'unsubscribed' AND ${inRange(sql`created_at`, range)})::int AS unsub,
             count(*) FILTER (WHERE reason = 'unsubscribed' AND ${inPreviousRange(sql`created_at`, range)})::int AS unsub_prev
           FROM outreach_suppression_list
-          WHERE organization_id = ${org} AND reason IN ('bounced', 'unsubscribed') AND ${inCurrentOrPreviousRange(sql`created_at`, range)}
+          WHERE organization_id = ${org} AND reason = 'unsubscribed' AND ${inCurrentOrPreviousRange(sql`created_at`, range)}
         `),
       () =>
         db.execute<CampaignRow>(sql`
-          SELECT c.id, c.name, c.status,
+          SELECT c.id::text AS id, c.name, c.status,
             count(l.id)::int AS leads,
             count(l.id) FILTER (WHERE l.sequence_status <> 'pending')::int AS contacted,
             count(l.id) FILTER (WHERE l.sequence_status = 'reply_received')::int AS replied,
@@ -133,15 +202,90 @@ export async function getEmailAnalytics(range: AnalyticsRange): Promise<EmailAna
           WHERE c.organization_id = ${org}
           GROUP BY c.id, c.name, c.status
           HAVING NOT (c.status = 'draft' AND count(l.id) = 0)
+          UNION ALL
+          SELECT
+            ${directCampaignId}::text AS id,
+            'Direct CRM outreach'::text AS name,
+            'active'::text AS status,
+            count(DISTINCT r.person_id)::int AS leads,
+            count(DISTINCT r.person_id) FILTER (WHERE r.last_outbound_at IS NOT NULL)::int AS contacted,
+            count(DISTINCT r.person_id) FILTER (
+              WHERE EXISTS (
+                SELECT 1
+                FROM crm_conversation_messages m
+                JOIN crm_conversations cv_r ON cv_r.id = m.conversation_id
+                WHERE cv_r.crm_record_id = r.id
+                  AND cv_r.organization_id = ${org}
+                  AND m.channel = 'email'
+                  AND m.direction = 'inbound'
+                  AND ${isHumanInboundMessageSql()}
+              )
+            )::int AS replied,
+            (
+              SELECT count(DISTINCT r2.person_id)::int
+              FROM crm_records r2
+              JOIN people p2 ON p2.id = r2.person_id AND p2.organization_id = ${org}
+              WHERE r2.organization_id = ${org}
+                AND NOT EXISTS (
+                  SELECT 1 FROM outreach_leads ol2
+                  WHERE ol2.person_id = r2.person_id AND ol2.id IN ${orgLeadIds}
+                )
+                AND (
+                  EXISTS (
+                    SELECT 1 FROM outreach_suppression_list sl
+                    WHERE sl.organization_id = ${org}
+                      AND lower(sl.email) = lower(p2.email)
+                      AND sl.reason = 'bounced'
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM crm_send_attempts sa2
+                    JOIN crm_drafts d2 ON d2.id = sa2.draft_id
+                    WHERE d2.crm_record_id = r2.id
+                      AND d2.channel = 'email'
+                      AND (sa2.status IN ('failed', 'delivery_uncertain') OR (sa2.status = 'reconciled' AND sa2.provider_message_id IS NULL))
+                      AND coalesce(sa2.error, '') ~* '(55[0-9]|5\\.[0-9]\\.[0-9]|rejected|does not exist|doesn''t exist|bounced|user unknown)'
+                  )
+                )
+            ) AS bounced
+          FROM crm_records r
+          WHERE r.organization_id = ${org}
+            AND (
+              r.active_channel = 'email'
+              OR EXISTS (
+                SELECT 1 FROM crm_conversations cv
+                WHERE cv.crm_record_id = r.id AND cv.channel = 'email'
+              )
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM outreach_leads ol
+              WHERE ol.person_id = r.person_id AND ol.id IN ${orgLeadIds}
+            )
+          HAVING count(DISTINCT r.person_id) > 0
         `),
       () =>
         db.execute<CampaignSendRow>(sql`
-          SELECT l.campaign_id, ${campaignDay} AS d, count(*)::int AS sends
+          SELECT l.campaign_id::text AS campaign_id, ${campaignDay} AS d, count(*)::int AS sends
           FROM outreach_emails e
           JOIN outreach_leads l ON l.id = e.lead_id
           WHERE e.status = 'sent' AND ${inRange(sql`e.sent_at`, range)}
             AND l.campaign_id IN (SELECT id FROM outreach_campaigns WHERE organization_id = ${org})
           GROUP BY l.campaign_id, d
+          UNION ALL
+          SELECT ${directCampaignId}::text AS campaign_id, ${crmSentDay} AS d, count(*)::int AS sends
+          FROM crm_conversation_messages m
+          JOIN crm_conversations cv ON cv.id = m.conversation_id
+          WHERE cv.organization_id = ${org}
+            AND m.channel = 'email'
+            AND m.direction = 'outbound'
+            AND ${inRange(sql`m.sent_at`, range)}
+            AND (
+              m.provider_message_id IS NULL
+              OR NOT EXISTS (
+                SELECT 1 FROM outreach_emails oe
+                WHERE oe.message_id = m.provider_message_id AND oe.status = 'sent'
+              )
+            )
+          GROUP BY d
         `),
       () =>
         db.execute<MailboxRow>(sql`

@@ -12,7 +12,10 @@ export default async function AiSettingsPage() {
   const ctx = await requirePageOrgContext();
   const statuses = await runInOrganization(ctx.organizationId, () => listPlatformStatus());
   return (
-    <SettingsPage title="AI provider" description="The OpenRouter connection and models every AI feature uses, and where its prompts and traces live.">
+    <SettingsPage
+      title="AI provider"
+      description="Configure OpenAI Responses (/v1/responses), Anthropic Messages (/v1/messages), or OpenRouter with custom BaseURL, API key, model discovery, and live test calls, plus optional Langfuse prompt and trace observability."
+    >
       <ByokSettingsClient>
         <section className="flex flex-col gap-3 pt-4">
           <div>

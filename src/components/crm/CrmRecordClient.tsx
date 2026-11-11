@@ -11,10 +11,13 @@ import {
   RiCheckboxCircleLine,
   RiCloseCircleLine,
   RiErrorWarningLine,
+  RiFileTextLine,
+  RiGlobalLine,
   RiHistoryLine,
   RiLinkedinLine,
   RiLoopLeftLine,
   RiMailLine,
+  RiMapPinLine,
   RiMoreLine,
   RiPauseLine,
   RiPhoneLine,
@@ -23,6 +26,7 @@ import {
   RiReplyLine,
   RiSaveLine,
   RiSendPlaneLine,
+  RiShieldCheckLine,
   RiSkipForwardLine,
   RiSparklingLine,
   RiTimerLine,
@@ -52,8 +56,8 @@ import {
   subtleButtonClass,
 } from "./CrmLayout";
 import { RecordBody } from "./CrmSkeletons";
-import { asList, asObject, crmFetch, displayName, errorMessage, formatDate, relativeDate } from "./crm-utils";
-import { ClassificationPicker, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, humanize } from "./ActionRowTools";
+import { asList, asObject, crmFetch, deriveCrmRecordStageDisplay, displayName, errorMessage, extractLeadContext, formatDate, LEAD_CRM_BADGE_STYLE, relativeDate } from "./crm-utils";
+import { ClassificationPicker, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, SendDraftButton, humanize } from "./ActionRowTools";
 import { ContactAvatar } from "./ContactAvatar";
 import { takeRecordWorkspace } from "./recordPrefetch";
 import { announceRecordChanged } from "./recordEvents";
@@ -157,7 +161,7 @@ export default function CrmRecordClient({ recordId, variant = "page" }: { record
 
   useEffect(() => { void load(); }, [load]);
 
-  const mutate = async (path: string, body: Data = {}, method = "POST", success = "Changes saved") => {
+  const mutate = async (path: string, body: Data = {}, method = "POST", success = "Changes saved"): Promise<boolean> => {
     setNotice("");
     setError("");
     try {
@@ -166,7 +170,11 @@ export default function CrmRecordClient({ recordId, variant = "page" }: { record
       // A list under the pop-up holding this record re-reads its row.
       announceRecordChanged(recordId);
       await load();
-    } catch (cause) { setError(errorMessage(cause)); }
+      return true;
+    } catch (cause) {
+      setError(errorMessage(cause));
+      return false;
+    }
   };
 
   // Only the first load blanks the page; a reload after an action keeps the
@@ -175,6 +183,8 @@ export default function CrmRecordClient({ recordId, variant = "page" }: { record
   if (error && !data.id) return <div className="space-y-6"><PageHeader back={variant === "page" ? BACK : undefined} title="Conversation" /><ErrorState message={error} onRetry={() => void load()} /></div>;
 
   const person = asObject(data.person);
+  const companyObj = asObject(data.company);
+  const leadContext = extractLeadContext(person, companyObj);
   const draft = asObject(data.draft);
   const conversations = asList<Data>(data.conversations);
   const events = asList<Data>(data.events);
@@ -220,10 +230,10 @@ export default function CrmRecordClient({ recordId, variant = "page" }: { record
         onCallStarted={() => setCallsRefreshKey((key) => key + 1)}
         moveStage={<MoveStageDialog
           categories={categories}
-          categoryKey={String(data.categoryKey ?? asObject(data.classification).category ?? "other")}
+          categoryKey={data.categoryKey ? String(data.categoryKey) : asObject(data.classification).category ? String(asObject(data.classification).category) : null}
           subcategoryId={data.subcategoryId ? String(data.subcategoryId) : null}
           contextVersion={Number(data.contextVersion)}
-          onMove={async (body) => { await mutate(`/records/${String(data.id)}/stage`, body, "POST", moveStageSuccessMessage(body)); return true; }}
+          onMove={(body) => mutate(`/records/${String(data.id)}/stage`, body, "POST", moveStageSuccessMessage(body))}
         />}
       />
 
@@ -236,6 +246,10 @@ export default function CrmRecordClient({ recordId, variant = "page" }: { record
         { label: "Sequence", value: activeSequence.name ? `${String(activeSequence.name)}${activeRun.status === "paused" ? " · paused" : ""}` : "None running", icon: RiLoopLeftLine },
         { label: channels.length > 1 ? "Channels" : "Channel", value: channels.join(", ") || "—", icon: RiChat3Line },
       ]} />
+
+      {(leadContext.leadReason || leadContext.verificationNote) && (
+        <LeadContextCard leadReason={leadContext.leadReason} verificationNote={leadContext.verificationNote} />
+      )}
 
       {/* The measured height only holds if the grid row is allowed to be
           smaller than its content: an auto row grows to the longest thread and
@@ -316,9 +330,9 @@ const WORKFLOW_BADGE: Record<string, { label: string; color: React.ComponentProp
   waiting: { label: "Waiting", color: "purple" },
   paused: { label: "Paused", color: "pink" },
   closed: { label: "Closed", color: "green" },
-  classifying: { label: "Classifying", color: "gray" },
-  unclassified: { label: "Unclassified", color: "gray" },
-  idle: { label: "Idle", color: "gray" },
+  classifying: { label: "Classifying", color: "teal" },
+  unclassified: { label: "Replied", color: "teal" },
+  idle: { label: "New lead", color: "gray" },
 };
 
 function RecordHeader({ back, data, person, name, avatarUrl, currentStep, activeRun, onAction, onCallStarted, moveStage }: {
@@ -330,7 +344,7 @@ function RecordHeader({ back, data, person, name, avatarUrl, currentStep, active
   avatarUrl: string | null;
   currentStep: Data;
   activeRun: Data;
-  onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<void>;
+  onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<boolean>;
   /** Bumps the Calls card's refreshKey once the extension accepts a call. */
   onCallStarted: () => void;
   /** Move stage: record something that happened and move the lead on. */
@@ -345,7 +359,11 @@ function RecordHeader({ back, data, person, name, avatarUrl, currentStep, active
   // Skipping needs a running sequence with a step to skip.
   const canSkip = !closed && !paused && activeRun.status === "active" && Boolean(currentStep.name);
   const title = text(person.title);
-  const company = text(person.company);
+  const companyRecord = asObject(data.company);
+  const company = text(person.company) || text(companyRecord.name);
+  const companyDomain = text(companyRecord.domain);
+  const companyHref = companyDomain ? (companyDomain.startsWith("http") ? companyDomain : `https://${companyDomain}`) : "";
+  const leadContext = extractLeadContext(person, companyRecord);
   const email = text(person.email);
   const phone = text(person.phone) || null;
   const linkedin = text(person.linkedinUrl);
@@ -353,7 +371,14 @@ function RecordHeader({ back, data, person, name, avatarUrl, currentStep, active
   // "Profile" label that hides which account it points at.
   const linkedinHref = linkedin.startsWith("http") ? linkedin : `https://www.linkedin.com/in/${linkedin}`;
   const linkedinSlug = linkedin.replace(/\/+$/, "").split("/").pop() || linkedin;
-  const state = WORKFLOW_BADGE[workflowState];
+  const headerDraft = asObject(data.draft);
+  const state = workflowState === "idle"
+    ? headerDraft.status === "awaiting_review" && Boolean(headerDraft.autoSendAt)
+      ? { label: "Queued", color: "sky" as const }
+      : Boolean(data.lastOutboundAt)
+        ? { label: "Contacted", color: "blue" as const }
+        : WORKFLOW_BADGE.idle
+    : WORKFLOW_BADGE[workflowState];
 
   return (
     <PageHeader
@@ -363,11 +388,14 @@ function RecordHeader({ back, data, person, name, avatarUrl, currentStep, active
         <span className="truncate">{name}</span>
       </span>}
       badge={<>
+        {leadContext.companyCode && <Badge.Root variant="lighter" size="medium" color="gray">{leadContext.companyCode}</Badge.Root>}
         {state && <Badge.Root variant="lighter" size="medium" color={state.color}><Badge.Dot />{state.label}</Badge.Root>}
         {dnc && <Badge.Root variant="lighter" size="medium" color="red"><Badge.Dot />Do not contact</Badge.Root>}
       </>}
       description={<div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-paragraph-sm text-text-sub-600">
         {(title || company) && <span className="inline-flex min-w-0 items-center gap-1.5"><RiBriefcaseLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" /><span className="truncate">{[title, company].filter(Boolean).join(" · ")}</span></span>}
+        {companyDomain && <a href={companyHref} target="_blank" rel="noreferrer" className="inline-flex min-w-0 items-center gap-1.5 transition hover:text-text-strong-950"><RiGlobalLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" /><span className="truncate">{companyDomain}</span><RiArrowRightUpLine className="size-3.5 shrink-0 text-text-soft-400" aria-hidden="true" /></a>}
+        {leadContext.region && <span className="inline-flex items-center gap-1.5"><RiMapPinLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" /><span>{leadContext.region}</span></span>}
         {email && <a href={`mailto:${email}`} className="inline-flex min-w-0 items-center gap-1.5 transition hover:text-text-strong-950"><RiMailLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" /><span className="truncate">{email}</span></a>}
         {phone && <span className="inline-flex items-center gap-1.5"><RiPhoneLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" />{phone}</span>}
         {linkedin && <a href={linkedinHref} target="_blank" rel="noreferrer" title={`Open ${name} on LinkedIn`} className="inline-flex min-w-0 items-center gap-1.5 transition hover:text-text-strong-950"><RiLinkedinLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" /><span className="truncate">{linkedinSlug}</span><RiArrowRightUpLine className="size-3.5 shrink-0 text-text-soft-400" aria-hidden="true" /></a>}
@@ -408,6 +436,54 @@ function RecordHeader({ back, data, person, name, avatarUrl, currentStep, active
         </Dropdown.Root>
       </>}
     />
+  );
+}
+
+const INLINE_URL_PATTERN = /(https?:\/\/[^\s)）\]"'>]+)/g;
+
+function renderTextWithLinks(content: string): React.ReactNode {
+  const parts = content.split(INLINE_URL_PATTERN);
+  return parts.map((part, index) => {
+    if (/^https?:\/\//.test(part)) {
+      return (
+        <a
+          key={index}
+          href={part}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-0.5 text-primary-base underline decoration-primary-alpha-24 underline-offset-2 transition hover:text-primary-dark"
+        >
+          <span className="break-all">{part}</span>
+          <RiArrowRightUpLine className="size-3.5 shrink-0" aria-hidden="true" />
+        </a>
+      );
+    }
+    return <span key={index}>{part}</span>;
+  });
+}
+
+function LeadContextCard({ leadReason, verificationNote }: { leadReason: string; verificationNote: string }) {
+  return (
+    <div className="grid gap-2.5 rounded-xl bg-bg-weak-50 px-4 py-3 text-paragraph-xs text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200 lg:grid-cols-2">
+      {leadReason && (
+        <div className="flex min-w-0 items-start gap-2">
+          <RiFileTextLine className="mt-0.5 size-4 shrink-0 text-text-soft-400" aria-hidden="true" />
+          <div className="min-w-0">
+            <span className="font-medium text-text-strong-950">录入理由与切入方案：</span>
+            <span className="leading-5">{renderTextWithLinks(leadReason)}</span>
+          </div>
+        </div>
+      )}
+      {verificationNote && (
+        <div className="flex min-w-0 items-start gap-2">
+          <RiShieldCheckLine className="mt-0.5 size-4 shrink-0 text-success-base" aria-hidden="true" />
+          <div className="min-w-0">
+            <span className="font-medium text-text-strong-950">联系人核验依据：</span>
+            <span className="leading-5">{renderTextWithLinks(verificationNote)}</span>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -523,7 +599,7 @@ function ReplyComposer({ record, draft, conversations, citations, uncertainAttem
   conversations: Data[];
   citations: Data[];
   uncertainAttempt?: Data;
-  onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<void>;
+  onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<boolean>;
 }) {
   const draftConversationId = text(draft.conversationId);
   const defaultConversation = conversations.find((item) => item.id === draftConversationId) ?? conversations.find((item) => item.channel === record.activeChannel) ?? conversations[0];
@@ -587,8 +663,8 @@ function ReplyComposer({ record, draft, conversations, citations, uncertainAttem
         {editingCurrentDraft && draft.status === "failed" && <InlineWarning tone="danger" title="The draft could not be written" detail={text(draft.error, "Regenerate it, or write the reply yourself.")} />}
         {editingCurrentDraft && draft.status === "awaiting_review" && Boolean(draft.autoSendAt) && (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg bg-information-lighter p-3 ring-1 ring-inset ring-information-light">
-            <Badge.Root variant="lighter" size="medium" color="blue" className="shrink-0 whitespace-nowrap"><Badge.Dot />Sends automatically</Badge.Root>
-            <p className="min-w-0 flex-1 text-paragraph-xs text-information-dark">Goes out on its own when its account&apos;s next slot opens: one follow-up per account every 30 minutes by default (Sending rules), inside sending hours.</p>
+            <Badge.Root variant="lighter" size="medium" color="blue" className="shrink-0 whitespace-nowrap"><Badge.Dot />{draft.sequenceStepRunId ? "Sends automatically" : "Queued in working hours"}</Badge.Root>
+            <p className="min-w-0 flex-1 text-paragraph-xs text-information-dark">Goes out automatically when its account&apos;s next weekday slot opens (paced by Sending rules inside working hours).</p>
             <button type="button" className={cn(secondaryButtonClass, "h-7 whitespace-nowrap px-2.5 text-label-xs")} onClick={() => void onAction(`/drafts/${String(draft.id)}/review`, {}, "POST", "Moved to Action required")}>Review before sending</button>
           </div>
         )}
@@ -633,9 +709,13 @@ function ReplyComposer({ record, draft, conversations, citations, uncertainAttem
             <SenderPicker conversations={conversations} value={conversationId} onChange={changeConversation} />
             <div className="ml-auto flex items-center gap-2">
               {editingCurrentDraft ? <>
-                <RegenerateDraftDialog open={regenerateOpen} onOpenChange={setRegenerateOpen} onSubmit={async (feedback) => { await onAction(`/drafts/${String(draft.id)}/regenerate`, { feedback }, "POST", "Draft rewritten with your notes"); return true; }} />
+                <RegenerateDraftDialog open={regenerateOpen} onOpenChange={setRegenerateOpen} onSubmit={(feedback) => onAction(`/drafts/${String(draft.id)}/regenerate`, { feedback }, "POST", "Draft rewritten with your notes")} />
                 <button type="button" disabled={!ready} className={secondaryButtonClass} onClick={() => void onAction(`/drafts/${String(draft.id)}`, { subject: requestSubject, body, revision }, "PATCH", "Draft saved")}><RiSaveLine className="size-4" aria-hidden="true" />Save</button>
-                <button type="button" disabled={!ready} className={primaryButtonClass} onClick={() => void onAction(`/drafts/${String(draft.id)}/send`, { subject: requestSubject, body, revision }, "POST", "Reply queued for sending")}><RiSendPlaneLine className="size-4" aria-hidden="true" />Approve &amp; send</button>
+                <SendDraftButton
+                  disabled={!ready}
+                  onSendNow={() => void onAction(`/drafts/${String(draft.id)}/send`, { subject: requestSubject, body, revision }, "POST", "Message sent")}
+                  onQueueInWorkingHours={() => void onAction(`/drafts/${String(draft.id)}/send`, { subject: requestSubject, body, revision, scheduleInWorkingHours: true }, "POST", "Queued for working hours")}
+                />
               </> : <button type="button" disabled={!ready} className={primaryButtonClass} onClick={() => void onAction(`/records/${String(record.id)}/draft`, { conversationId, subject: requestSubject, bodyText: body, bodyHtml: null }, "POST", "Draft created and ready for review")}><RiSaveLine className="size-4" aria-hidden="true" />Create draft</button>}
             </div>
           </div>
@@ -711,12 +791,24 @@ function InlineWarning({ tone, title, detail }: { tone: "warning" | "danger"; ti
  * never saw at all — the two need their own controls, not one dropdown doing
  * both jobs.
  */
-function ClassificationSelect({ record, categories, onAction }: { record: Data; categories: Data[]; onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<void> }) {
+function ClassificationSelect({ record, categories, onAction }: { record: Data; categories: Data[]; onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<boolean> }) {
   const classification = asObject(record.classification);
-  const categoryKey = String(record.categoryKey ?? classification.category ?? "other");
+  const categoryKey = record.categoryKey
+    ? String(record.categoryKey)
+    : classification.category
+      ? String(classification.category)
+      : null;
   const subcategoryId = record.subcategoryId ? String(record.subcategoryId) : null;
+  const subcategoryName = record.subcategory ? String(record.subcategory) : null;
   const confidence = classification.confidence != null ? Math.round(Number(classification.confidence) * 100) : null;
   const reason = text(classification.reason);
+  const stageDisplay = deriveCrmRecordStageDisplay({
+    record,
+    draft: asObject(record.draft),
+    subcategoryName,
+    dnc: Boolean(record.dnc),
+  });
+  const stageStyle = LEAD_CRM_BADGE_STYLE[stageDisplay.kind];
 
   return (
     <div className="flex items-center gap-2">
@@ -727,8 +819,11 @@ function ClassificationSelect({ record, categories, onAction }: { record: Data; 
         categories={categories}
         categoryKey={categoryKey}
         subcategoryId={subcategoryId}
-        subcategoryName={record.subcategory ? String(record.subcategory) : null}
-        title="Fix classification — the AI misread this reply"
+        subcategoryName={subcategoryName}
+        placeholderLabel={stageDisplay.chip}
+        placeholderTone={stageStyle.tone}
+        placeholderDot={stageStyle.dot}
+        title={categoryKey ? "Fix classification — the AI misread this reply" : `${stageDisplay.chip} — click to set category manually`}
         onChange={(chosen) => void onAction(`/records/${String(record.id)}/classification`, {
           ...chosen,
           expectedContextVersion: record.contextVersion,
@@ -745,7 +840,7 @@ function ClassificationSelect({ record, categories, onAction }: { record: Data; 
  * and the record stays where it was. This surfaces that held proposal so a
  * human decides rather than it sitting silent in the classification history.
  */
-function ProposedClassificationNotice({ record, categories, onAction }: { record: Data; categories: Data[]; onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<void> }) {
+function ProposedClassificationNotice({ record, categories, onAction }: { record: Data; categories: Data[]; onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<boolean> }) {
   const classification = asObject(record.classification);
   if (classification.status !== "proposed") return null;
   const proposedCategoryKey = classification.proposedCategoryKey ? String(classification.proposedCategoryKey) : null;

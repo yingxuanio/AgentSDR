@@ -1,5 +1,6 @@
 import "server-only";
 
+import { fetchRemoteModelList, normalizeAnthropicBaseUrl, normalizeOpenAiBaseUrl } from "./custom-providers";
 import { listOpenRouterByokCredentials, verifyOpenRouterInferenceKey } from "./openrouter";
 import { getAiProvider } from "../catalog";
 
@@ -21,6 +22,16 @@ export async function verifyAiCredentials(
   if (!apiKey) throw new Error("API key is required");
 
   try {
+    if (providerKey === "openai") {
+      normalizeOpenAiBaseUrl(credentials.baseUrl);
+      await fetchRemoteModelList("openai", credentials);
+      return;
+    }
+    if (providerKey === "anthropic") {
+      normalizeAnthropicBaseUrl(credentials.baseUrl);
+      await fetchRemoteModelList("anthropic", credentials);
+      return;
+    }
     if (providerKey === "openrouter") {
       const managementKey = credentials.managementKey?.trim();
       if (!managementKey) throw new Error("OpenRouter management key is required");

@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { inboxContacts, inboxMessages } from "@/lib/inbox/schema";
 import { companies, people } from "@/lib/leads/schema";
 import { linkedInAccounts, leads as linkedinLeads, messages as linkedinMessages } from "@/lib/linkedin/schema";
-import { outreachEmails, outreachLeads } from "@/lib/outreach/schema";
+import { outreachEmails, outreachLeads, suppressionList } from "@/lib/outreach/schema";
 import { whatsappAccounts } from "@/lib/whatsapp/schema";
 import {
   crmClassifications,
@@ -249,6 +249,22 @@ export async function listCrmActions(input: CrmActionFilters = {}) {
       .innerJoin(crmSequenceSteps, eq(crmSequenceSteps.id, crmSequenceStepRuns.sequenceStepId))
       .where(inArray(crmSequenceStepRuns.id, draftStepRunIds))
     : [];
+  const rowEmails = Array.from(
+    new Set(rows.map((r) => r.person.email?.trim().toLowerCase()).filter((e): e is string => Boolean(e))),
+  );
+  const bouncedSuppressionRows = rowEmails.length
+    ? await db
+        .select({ email: suppressionList.email })
+        .from(suppressionList)
+        .where(
+          and(
+            inOrg(suppressionList),
+            eq(suppressionList.reason, "bounced"),
+            inArray(sql`lower(${suppressionList.email})`, rowEmails),
+          ),
+        )
+    : [];
+  const bouncedEmailSet = new Set(bouncedSuppressionRows.map((r) => r.email.trim().toLowerCase()));
   const draftStepByRunId = new Map(draftSteps.map((row) => [row.stepRunId, row]));
   const latestInbound = new Map(messages.map((row) => [row.recordId, row.message]));
   const latestClassification = new Map(classifications.map((row) => [row.crmRecordId, row]));
@@ -262,6 +278,7 @@ export async function listCrmActions(input: CrmActionFilters = {}) {
     const draft = currentDraft.get(row.record.id) ?? null;
     const draftStep = draft?.sequenceStepRunId ? draftStepByRunId.get(draft.sequenceStepRunId) ?? null : null;
     const aiChanged = Boolean(classification && !classification.acknowledgedAt);
+    const isBounced = Boolean(row.person.email && bouncedEmailSet.has(row.person.email.trim().toLowerCase()));
     // Off the queue there is no action to name, so say what the record is
     // waiting on instead of falling through to "Human review".
     const actionType = row.stage === "exhausted"
@@ -271,17 +288,27 @@ export async function listCrmActions(input: CrmActionFilters = {}) {
         ? "Classifying reply"
         : row.record.workflowState === "paused"
         ? "Paused"
+        : draft?.status === "awaiting_review" && draft.autoSendAt
+        ? "Queued to send"
         : row.record.nextActionAt
         ? "Follow-up scheduled"
-        : "Awaiting their reply"
+        : row.record.lastOutboundAt
+        ? "Awaiting their reply"
+        : "Outreach not sent yet"
       : row.record.workflowState === "error"
-      ? "Processing error"
+      ? isBounced
+        ? "Email bounced"
+        : "Processing error"
       : classification?.status === "proposed"
         ? "Classification review"
         : draft?.status === "delivery_uncertain"
           ? "Delivery reconciliation"
           : draft?.status === "awaiting_review"
-            ? draftStep?.stepType === "follow_up" ? "Follow-up review" : "Reply review"
+            ? draftStep?.stepType === "follow_up"
+              ? "Follow-up review"
+              : row.record.lastInboundAt
+                ? "Reply review"
+                : "Outreach review"
             : row.record.nextActionAt && row.record.nextActionAt <= new Date()
               // Due from WhatsApp Calling (calls/crmFollowUp.ts) — a call-only
               // record, with no reply on it: the rep calls or messages them;
@@ -320,6 +347,7 @@ export async function listCrmActions(input: CrmActionFilters = {}) {
       aiChanged,
       activeRun: run,
       draft,
+      bounced: isBounced,
       contactPolicy: policyByPerson.get(row.record.personId) ?? null,
       lastRun: lastRunByRecord.get(row.record.id) ?? null,
     };
@@ -570,12 +598,28 @@ export async function getCrmRecordWorkspace(recordId: string) {
         label: LINKEDIN_TYPE_LABELS[message.type] ?? null,
       })),
   ].sort((a, b) => new Date(a.sentAt ?? a.createdAt).getTime() - new Date(b.sentAt ?? b.createdAt).getTime());
+  const bouncedRow = header.person.email
+    ? (
+        await db
+          .select({ email: suppressionList.email })
+          .from(suppressionList)
+          .where(
+            and(
+              inOrg(suppressionList),
+              eq(suppressionList.reason, "bounced"),
+              sql`lower(${suppressionList.email}) = lower(${header.person.email})`,
+            ),
+          )
+          .limit(1)
+      )[0]
+    : undefined;
   return {
     ...header.record,
     person: { ...header.person, company: header.company?.name ?? null },
     company: header.company,
     subcategory: header.subcategory?.name ?? null,
     dnc: header.policy?.doNotContact ?? false,
+    bounced: Boolean(bouncedRow),
     contactPolicy: header.policy,
     classification: latestClassification ? {
       ...latestClassification,
@@ -640,6 +684,8 @@ export type CrmPeopleProjection = {
   categoryKey: string | null;
   subcategory: string | null;
   workflowState: string;
+  closed: boolean;
+  closedReason: string | null;
   activeChannel: string | null;
   activeSequence: string | null;
   currentStep: string | null;
@@ -648,32 +694,92 @@ export type CrmPeopleProjection = {
   lastInteractionAt: Date | null;
   nextActionAt: Date | null;
   unacknowledgedAiChange: boolean;
+  dnc: boolean;
+  bounced: boolean;
+  latestDraft: {
+    status: string;
+    autoSendAt: Date | null;
+    channel: string;
+    subject: string | null;
+  } | null;
+  contactPolicy: {
+    doNotContact: boolean;
+    reason: string | null;
+    source: string | null;
+    reviewAfter: Date | null;
+    setAt: Date | null;
+    clearedAt: Date | null;
+  } | null;
 };
 
 export async function crmProjectionForPeople(personIds: string[]): Promise<Map<string, CrmPeopleProjection>> {
   if (!personIds.length) return new Map<string, CrmPeopleProjection>();
-  const records = await db.select({ record: crmRecords, subcategory: crmSubcategories })
-    .from(crmRecords).leftJoin(crmSubcategories, eq(crmSubcategories.id, crmRecords.subcategoryId))
-    .where(and(inOrg(crmRecords), inArray(crmRecords.personId, personIds)));
+  const [records, policies, personRows] = await Promise.all([
+    db.select({ record: crmRecords, subcategory: crmSubcategories })
+      .from(crmRecords).leftJoin(crmSubcategories, eq(crmSubcategories.id, crmRecords.subcategoryId))
+      .where(and(inOrg(crmRecords), inArray(crmRecords.personId, personIds))),
+    db.select().from(crmPersonContactPolicies).where(inArray(crmPersonContactPolicies.personId, personIds)),
+    db.select({ id: people.id, email: people.email })
+      .from(people)
+      .where(and(inOrg(people), inArray(people.id, personIds))),
+  ]);
+  const emailByPerson = new Map(
+    personRows.map((p) => [p.id, p.email?.trim().toLowerCase() ?? null]),
+  );
+  const candidateEmails = Array.from(
+    new Set(Array.from(emailByPerson.values()).filter((e): e is string => Boolean(e))),
+  );
+  const bouncedRows = candidateEmails.length
+    ? await db
+        .select({ email: suppressionList.email })
+        .from(suppressionList)
+        .where(
+          and(
+            inOrg(suppressionList),
+            eq(suppressionList.reason, "bounced"),
+            inArray(sql`lower(${suppressionList.email})`, candidateEmails),
+          ),
+        )
+    : [];
+  const bouncedEmails = new Set(bouncedRows.map((r) => r.email.trim().toLowerCase()));
+  const policyByPerson = new Map(policies.map((p) => [p.personId, p]));
   const recordIds = records.map((row) => row.record.id);
-  const [runs, classifications] = recordIds.length ? await Promise.all([
+  const [runs, classifications, drafts] = recordIds.length ? await Promise.all([
     db.select({ run: crmSequenceRuns, sequence: crmSequences, step: crmSequenceSteps })
       .from(crmSequenceRuns).innerJoin(crmSequences, eq(crmSequences.id, crmSequenceRuns.sequenceId))
       .leftJoin(crmSequenceSteps, and(eq(crmSequenceSteps.sequenceVersionId, crmSequenceRuns.sequenceVersionId), eq(crmSequenceSteps.position, crmSequenceRuns.currentStepPosition)))
       .where(and(inArray(crmSequenceRuns.crmRecordId, recordIds), inArray(crmSequenceRuns.status, ["active", "paused"]))),
     db.select().from(crmClassifications).where(inArray(crmClassifications.crmRecordId, recordIds)).orderBy(desc(crmClassifications.createdAt)),
-  ]) : [[], []];
+    db.select({
+      crmRecordId: crmDrafts.crmRecordId,
+      status: crmDrafts.status,
+      autoSendAt: crmDrafts.autoSendAt,
+      channel: crmDrafts.channel,
+      subject: crmDrafts.subject,
+    }).from(crmDrafts).where(inArray(crmDrafts.crmRecordId, recordIds)).orderBy(desc(crmDrafts.updatedAt)),
+  ]) : [[], [], []];
   const runByRecord = new Map(runs.map((row) => [row.run.crmRecordId, row]));
   const classificationByRecord = new Map<string, (typeof classifications)[number]>();
   for (const item of classifications) if (!classificationByRecord.has(item.crmRecordId)) classificationByRecord.set(item.crmRecordId, item);
+  const draftByRecord = new Map<string, (typeof drafts)[number]>();
+  for (const item of drafts) {
+    const prev = draftByRecord.get(item.crmRecordId);
+    if (!prev || (prev.status === "discarded" && item.status !== "discarded")) {
+      draftByRecord.set(item.crmRecordId, item);
+    }
+  }
   return new Map<string, CrmPeopleProjection>(records.map(({ record, subcategory }) => {
     const run = runByRecord.get(record.id);
     const classification = classificationByRecord.get(record.id);
+    const policy = policyByPerson.get(record.personId);
+    const draft = draftByRecord.get(record.id) ?? null;
     return [record.personId, {
       recordId: record.id,
       categoryKey: record.categoryKey,
       subcategory: subcategory?.name ?? null,
       workflowState: record.workflowState,
+      closed: record.workflowState === "closed",
+      closedReason: record.closedReason ?? null,
       activeChannel: record.activeChannel,
       activeSequence: run?.sequence.name ?? null,
       currentStep: run?.step?.name ?? null,
@@ -682,6 +788,22 @@ export async function crmProjectionForPeople(personIds: string[]): Promise<Map<s
       lastInteractionAt: record.lastInteractionAt,
       nextActionAt: record.nextActionAt,
       unacknowledgedAiChange: Boolean(classification && !classification.acknowledgedAt),
+      dnc: Boolean(policy?.doNotContact),
+      bounced: Boolean(emailByPerson.get(record.personId) && bouncedEmails.has(emailByPerson.get(record.personId)!)),
+      latestDraft: draft ? {
+        status: draft.status,
+        autoSendAt: draft.autoSendAt,
+        channel: draft.channel,
+        subject: draft.subject,
+      } : null,
+      contactPolicy: policy ? {
+        doNotContact: policy.doNotContact,
+        reason: policy.reason,
+        source: policy.source,
+        reviewAfter: policy.reviewAfter,
+        setAt: policy.setAt,
+        clearedAt: policy.clearedAt,
+      } : null,
     }];
   }));
 }

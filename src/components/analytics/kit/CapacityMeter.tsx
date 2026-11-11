@@ -43,7 +43,7 @@ export function CapacityMeter({ label, used, limit, segments = 20, detail }: { l
         {state === "ok" && <RiCheckLine className="size-3.5" aria-hidden="true" />}
         {state === "warning" && <RiAlertLine className="size-3.5" aria-hidden="true" style={{ color: tone.fill }} />}
         {state === "critical" && <RiErrorWarningLine className="size-3.5" aria-hidden="true" style={{ color: tone.fill }} />}
-        {state === "ok" ? "Within limit" : state === "warning" ? "Near limit" : "At limit"}
+        {state === "ok" ? "Within limit" : state === "warning" ? "Near limit" : fraction > 1 ? "Over limit" : "At limit"}
       </p>
     </div>
   );

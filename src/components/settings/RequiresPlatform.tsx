@@ -55,7 +55,8 @@ export function PlatformConnectPrompt({
   guideHref?: string;
 }) {
   const integration = getPlatformIntegration(platform);
-  const name = integration?.name ?? "this integration";
+  const isEmailPlatform = platform === "google" || platform === "smtp";
+  const name = isEmailPlatform ? "SMTP / IMAP or Google Workspace" : (integration?.name ?? "this integration");
   const guide = guideHref ?? integration?.guideUrl;
 
   return (
