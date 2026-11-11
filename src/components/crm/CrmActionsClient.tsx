@@ -57,7 +57,7 @@ import { ContactAvatar } from "./ContactAvatar";
 import { ErrorState, primaryButtonClass, secondaryButtonClass } from "./CrmLayout";
 import { RowsSkeleton } from "./CrmSkeletons";
 import { CategoryDot, ClassificationPicker, HoverPreview, HoverPreviewProvider, InlineDraftEditor, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, SendDraftButton, humanize, type MoveStageBody, type RowMutation } from "./ActionRowTools";
-import { asList, asObject, CATEGORY_LABELS, crmFetch, displayName, errorMessage, extractLeadContext, formatDate, relativeDate, timeAgo } from "./crm-utils";
+import { asList, asObject, CATEGORY_LABELS, crmFetch, deriveCrmRecordStageDisplay, displayName, errorMessage, extractLeadContext, formatDate, LEAD_CRM_BADGE_STYLE, relativeDate, timeAgo } from "./crm-utils";
 import { prefetchRecordWorkspace } from "./recordPrefetch";
 import { useRecordChanged } from "./recordEvents";
 import { publishRecordQueue, withdrawRecordQueue, type RecordQueue } from "./recordQueue";
@@ -561,7 +561,7 @@ type IconType = React.ComponentType<{ className?: string }>;
  */
 export const STAGE_META = {
   needs_action: { label: "Needs action", short: "Needs action", color: HUE.amber, badge: "orange", icon: RiFlashlightFill as IconType, detail: "A reply, draft or follow-up is due" },
-  waiting: { label: "Waiting on them", short: "Waiting", color: HUE.purple, badge: "purple", icon: RiHourglass2Fill as IconType, detail: "Replied to, or a follow-up is scheduled" },
+  waiting: { label: "Waiting on them", short: "Waiting", color: HUE.purple, badge: "purple", icon: RiHourglass2Fill as IconType, detail: "Outreach sent, replied to, or follow-up scheduled" },
   exhausted: { label: "Follow-ups exhausted", short: "Exhausted", color: MUTED_STRONG, badge: "gray", icon: RiArchiveStackFill as IconType, detail: "Every follow-up sent, no reply yet" },
 } as const;
 export type PipelineStage = keyof typeof STAGE_META;
@@ -607,6 +607,7 @@ function draftStateOf({ editable, draftFull, status, dnc, sendable, actionText }
     case "Classification review": return { label: "Needs classification", tone: "warning", icon: RiPriceTag3Line, hint: "Confirm the classification first" };
     case "No sequence assigned": return { label: "No sequence", tone: "neutral", icon: RiLinkUnlink, hint: "Nothing runs for this classification" };
     case "Delivery reconciliation": return { label: "Confirm delivery", tone: "warning", icon: RiQuestionLine, hint: "Open the record to confirm the last send" };
+    case "Outreach review":
     case "Reply review":
     case "Human review": return { label: "Needs a reply", tone: "info", icon: RiReplyLine, hint: "No draft yet — write one on the record" };
     default: return { label: actionText, tone: "neutral", icon: RiTimeLine };
@@ -714,12 +715,22 @@ export function describeAction(action: Action, categories: Data[], pipeline: boo
   const sendableDraft = Boolean(editable) && !dnc && Number(editable?.expectedContextVersion) === Number(record.contextVersion);
   const actionText = actionType(action);
   const draftState = draftStateOf({ editable: Boolean(editable), draftFull, status: String(draft.status ?? ""), dnc, sendable: sendableDraft, actionText });
+  const crmStageDisplay = deriveCrmRecordStageDisplay(
+    {
+      record,
+      draft,
+      subcategoryName: subcategory.name ? String(subcategory.name) : null,
+      dnc,
+    },
+    now,
+  );
   return {
     id, href, record, person, activeRun, inbound, subcategory, classification, category, channel, stage,
     proposedCategoryKey, proposedSubcategoryId, proposedLabel, keepCategoryKey, keepSubcategoryId,
     dueLabel, dueDetail, dueColor, dueIcon, actionText, name, companyDomain, companyLabel,
     leadContext, leadContextSummary, leadContextFull,
     latestReplyFull, latestReply, draft, draftFull, draftReply, editable, repliedAt, sequenceLabel, stepLabel, sendableDraft, draftState,
+    crmStageDisplay,
     avatarUrl: person.profilePictureUrl ? String(person.profilePictureUrl) : null,
   };
 }
@@ -768,6 +779,7 @@ export function ProposalInline({ label, busy, onAccept, onKeep, className }: { l
 function ClassificationCell({ row, categories, busy, onClassify }: { row: Row; categories: Data[]; busy: boolean; onClassify: (choice: { categoryKey: string; subcategoryId: string | null }) => Promise<void> }) {
   const categoryKey = row.category === "unclassified" ? null : row.category;
   const subcategoryName = row.subcategory.name ? String(row.subcategory.name) : null;
+  const stageStyle = LEAD_CRM_BADGE_STYLE[row.crmStageDisplay.kind];
   return <div className="min-w-0">
     <ClassificationPicker
       compact
@@ -776,8 +788,11 @@ function ClassificationCell({ row, categories, busy, onClassify }: { row: Row; c
       categoryKey={categoryKey}
       subcategoryId={row.record.subcategoryId ? String(row.record.subcategoryId) : null}
       subcategoryName={subcategoryName}
+      placeholderLabel={row.crmStageDisplay.chip}
+      placeholderTone={stageStyle.tone}
+      placeholderDot={stageStyle.dot}
       disabled={busy}
-      title="Fix classification — the AI misread this reply"
+      title={categoryKey ? "Fix classification — the AI misread this reply" : `${row.crmStageDisplay.chip} — click to set category manually`}
       onChange={(choice) => void onClassify(choice)}
     />
     {row.classification.status === "proposed" && <ProposalInline
@@ -1114,17 +1129,24 @@ export function ActionCard({ action, categories, now, busy, onOpen, onMutate, on
     </div>
 
     <div className="mt-3 flex flex-wrap items-center gap-1.5" data-row-tools>
-      <ClassificationPicker
-        compact
-        quiet
-        categories={categories}
-        categoryKey={row.category === "unclassified" ? null : row.category}
-        subcategoryId={record.subcategoryId ? String(record.subcategoryId) : null}
-        subcategoryName={row.subcategory.name ? String(row.subcategory.name) : null}
-        disabled={busy}
-        title="Fix classification — the AI misread this reply"
-        onChange={(choice) => void onClassify(choice)}
-      />
+      {(() => {
+        const cardCategoryKey = row.category === "unclassified" ? null : row.category;
+        const stageStyle = LEAD_CRM_BADGE_STYLE[row.crmStageDisplay.kind];
+        return <ClassificationPicker
+          compact
+          quiet
+          categories={categories}
+          categoryKey={cardCategoryKey}
+          subcategoryId={record.subcategoryId ? String(record.subcategoryId) : null}
+          subcategoryName={row.subcategory.name ? String(row.subcategory.name) : null}
+          placeholderLabel={row.crmStageDisplay.chip}
+          placeholderTone={stageStyle.tone}
+          placeholderDot={stageStyle.dot}
+          disabled={busy}
+          title={cardCategoryKey ? "Fix classification — the AI misread this reply" : `${row.crmStageDisplay.chip} — click to set category manually`}
+          onChange={(choice) => void onClassify(choice)}
+        />;
+      })()}
       {row.classification.status === "proposed" && <ProposalInline
         label={row.proposedLabel}
         busy={busy}
@@ -1133,7 +1155,12 @@ export function ActionCard({ action, categories, now, busy, onOpen, onMutate, on
       />}
     </div>
 
-    {row.latestReply && <HoverPreview title={String(row.inbound.subject ?? "").trim() || row.name} meta={formatDate(row.inbound.sentAt ?? row.repliedAt)} body={row.latestReplyFull} className="mt-3">
+    {(row.latestReply || row.leadContextSummary) && <HoverPreview
+      title={row.latestReplyFull ? (String(row.inbound.subject ?? "").trim() || row.name) : `${row.name}${row.leadContext.companyCode ? ` · ${row.leadContext.companyCode}` : ""}`}
+      meta={row.latestReplyFull ? formatDate(row.inbound.sentAt ?? row.repliedAt) : (row.leadContext.region || "拓客录入依据")}
+      body={row.latestReplyFull || row.leadContextFull}
+      className="mt-3"
+    >
       <ReplyQuote row={row} lines={2} />
     </HoverPreview>}
 

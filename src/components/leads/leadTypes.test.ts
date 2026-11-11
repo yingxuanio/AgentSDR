@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "bun:test";
+import { deriveCrmRecordStageDisplay } from "@/components/crm/crm-utils";
 import { deriveLeadCrmDisplay, type PersonCrmSummary } from "./leadTypes";
 
 const NOW = Date.parse("2026-11-11T05:00:00Z");
@@ -122,5 +123,66 @@ describe("deriveLeadCrmDisplay", () => {
     const res = deriveLeadCrmDisplay(makeCrm({ workflowState: "closed" }), NOW);
     assert.equal(res.kind, "closed");
     assert.equal(res.chip, "Closed");
+  });
+
+  test("deriveCrmRecordStageDisplay maps Pipeline Waiting & Action Required records consistently with Leads", () => {
+    // Pipeline -> Waiting row after cold email sent (no active draft object returned by listCrmActions)
+    const waitingSent = deriveCrmRecordStageDisplay(
+      {
+        record: {
+          id: "rec-w1",
+          categoryKey: null,
+          workflowState: "idle",
+          activeChannel: "email",
+          lastOutboundAt: "2026-11-11T04:50:00Z",
+        },
+        draft: {},
+      },
+      NOW,
+    );
+    assert.equal(waitingSent.kind, "contacted");
+    assert.equal(waitingSent.chip, "Contacted");
+
+    // Action required -> Draft awaiting review
+    const draftReady = deriveCrmRecordStageDisplay(
+      {
+        record: {
+          id: "rec-a1",
+          categoryKey: null,
+          workflowState: "action_required",
+          activeChannel: "email",
+        },
+        draft: {
+          id: "draft-1",
+          status: "awaiting_review",
+          autoSendAt: null,
+          channel: "email",
+        },
+      },
+      NOW,
+    );
+    assert.equal(draftReady.kind, "draft_ready");
+    assert.equal(draftReady.chip, "Draft ready");
+
+    // Pipeline -> Waiting queued in working hours
+    const queued = deriveCrmRecordStageDisplay(
+      {
+        record: {
+          id: "rec-q1",
+          categoryKey: null,
+          workflowState: "idle",
+          activeChannel: "email",
+        },
+        draft: {
+          id: "draft-2",
+          status: "awaiting_review",
+          autoSendAt: "2026-11-12T01:00:00Z",
+          channel: "email",
+        },
+      },
+      NOW,
+    );
+    assert.equal(queued.kind, "queued");
+    assert.equal(queued.chip, "Queued");
   });
 });

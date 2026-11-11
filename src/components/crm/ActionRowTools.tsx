@@ -59,7 +59,7 @@ export function CategoryDot({ categoryKey, className }: { categoryKey: string | 
  * still scans by outcome. The sequence and next draft follow whatever is
  * picked here, which is why it is worth having on the row at all.
  */
-export function ClassificationPicker({ categories, categoryKey, subcategoryId, subcategoryName, onChange, compact, quiet, disabled, className, title }: {
+export function ClassificationPicker({ categories, categoryKey, subcategoryId, subcategoryName, onChange, compact, quiet, disabled, className, title, placeholderLabel, placeholderTone, placeholderDot }: {
   categories: Data[];
   categoryKey: string | null;
   subcategoryId: string | null;
@@ -75,6 +75,10 @@ export function ClassificationPicker({ categories, categoryKey, subcategoryId, s
   className?: string;
   /** Overrides the compact badge's hover title — used where a second, different action (Move stage) sits next to it and the two need to read as distinct. */
   title?: string;
+  /** Pre-reply lifecycle label & tint (`Contacted`, `Draft ready`, `Queued`, etc.) shown when `categoryKey` is null so Leads & CRM stay unified. */
+  placeholderLabel?: string;
+  placeholderTone?: string;
+  placeholderDot?: string;
 }) {
   const value = subcategoryId || (categoryKey ? `category:${categoryKey}` : "");
   const save = (next: string) => {
@@ -92,7 +96,8 @@ export function ClassificationPicker({ categories, categoryKey, subcategoryId, s
     key: String(category.key),
     subcategories: asList<Data>(category.subcategories).filter((item) => item.active !== false),
   }));
-  const categoryLabel = categoryKey ? humanize(categoryKey) : "Unclassified";
+  const fallbackLabel = placeholderLabel || "Unclassified";
+  const categoryLabel = categoryKey ? humanize(categoryKey) : fallbackLabel;
 
   if (!compact) {
     return (
@@ -103,7 +108,7 @@ export function ClassificationPicker({ categories, categoryKey, subcategoryId, s
         onValueChange={(next) => save(next)}
       >
         <Select.Trigger aria-label="Classification" className={cn("max-w-56", className)}>
-          <Select.Value placeholder="Unclassified" />
+          <Select.Value placeholder={fallbackLabel} />
         </Select.Trigger>
         <Select.Content>
           {groups.length === 0 && categoryKey && <Select.Item value={value}>{categoryLabel}{subcategoryName ? ` · ${subcategoryName}` : ""}</Select.Item>}
@@ -120,9 +125,11 @@ export function ClassificationPicker({ categories, categoryKey, subcategoryId, s
   }
 
   const label = subcategoryName || categoryLabel;
-  const tone = quiet && !categoryKey
-    ? "bg-bg-white-0 text-text-sub-600 ring-0 outline-dashed outline-1 -outline-offset-1 outline-stroke-sub-300 hover:bg-bg-weak-50"
-    : categoryToneClass[categoryKey ?? ""] ?? "bg-bg-weak-50 text-text-sub-600 ring-stroke-soft-200";
+  const tone = !categoryKey && placeholderTone
+    ? placeholderTone
+    : quiet && !categoryKey
+      ? "bg-bg-white-0 text-text-sub-600 ring-0 outline-dashed outline-1 -outline-offset-1 outline-stroke-sub-300 hover:bg-bg-weak-50"
+      : categoryToneClass[categoryKey ?? ""] ?? "bg-bg-weak-50 text-text-sub-600 ring-stroke-soft-200";
   return (
     <Dropdown.Root>
       <Dropdown.Trigger asChild>
@@ -131,8 +138,9 @@ export function ClassificationPicker({ categories, categoryKey, subcategoryId, s
           disabled={disabled || groups.length === 0}
           aria-label={`Classification: ${label}. Change`}
           title={title ?? (subcategoryName ? `${categoryLabel} · ${subcategoryName}` : categoryLabel)}
-          className={cn("inline-flex h-6 max-w-full items-center gap-1 rounded-md pl-2 pr-1.5 text-label-xs ring-1 ring-inset transition", categoryKey && "hover:brightness-95", "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stroke-strong-950 disabled:opacity-60 data-[state=open]:ring-2 data-[state=open]:ring-stroke-strong-950", tone, className)}
+          className={cn("inline-flex h-6 max-w-full items-center gap-1.5 rounded-md pl-2 pr-1.5 text-label-xs ring-1 ring-inset transition", (categoryKey || placeholderTone) && "hover:brightness-95", "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stroke-strong-950 disabled:opacity-60 data-[state=open]:ring-2 data-[state=open]:ring-stroke-strong-950", tone, className)}
         >
+          {!categoryKey && placeholderDot && <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: placeholderDot }} />}
           <span className="truncate">{label}</span>
           <RiArrowDownSLine className="size-3.5 shrink-0 opacity-70" aria-hidden="true" />
         </button>

@@ -271,9 +271,13 @@ export async function listCrmActions(input: CrmActionFilters = {}) {
         ? "Classifying reply"
         : row.record.workflowState === "paused"
         ? "Paused"
+        : draft?.status === "awaiting_review" && draft.autoSendAt
+        ? "Queued to send"
         : row.record.nextActionAt
         ? "Follow-up scheduled"
-        : "Awaiting their reply"
+        : row.record.lastOutboundAt
+        ? "Awaiting their reply"
+        : "Outreach not sent yet"
       : row.record.workflowState === "error"
       ? "Processing error"
       : classification?.status === "proposed"
@@ -281,7 +285,11 @@ export async function listCrmActions(input: CrmActionFilters = {}) {
         : draft?.status === "delivery_uncertain"
           ? "Delivery reconciliation"
           : draft?.status === "awaiting_review"
-            ? draftStep?.stepType === "follow_up" ? "Follow-up review" : "Reply review"
+            ? draftStep?.stepType === "follow_up"
+              ? "Follow-up review"
+              : row.record.lastInboundAt
+                ? "Reply review"
+                : "Outreach review"
             : row.record.nextActionAt && row.record.nextActionAt <= new Date()
               // Due from WhatsApp Calling (calls/crmFollowUp.ts) — a call-only
               // record, with no reply on it: the rep calls or messages them;

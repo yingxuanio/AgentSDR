@@ -56,7 +56,7 @@ import {
   subtleButtonClass,
 } from "./CrmLayout";
 import { RecordBody } from "./CrmSkeletons";
-import { asList, asObject, crmFetch, displayName, errorMessage, extractLeadContext, formatDate, relativeDate } from "./crm-utils";
+import { asList, asObject, crmFetch, deriveCrmRecordStageDisplay, displayName, errorMessage, extractLeadContext, formatDate, LEAD_CRM_BADGE_STYLE, relativeDate } from "./crm-utils";
 import { ClassificationPicker, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, SendDraftButton, humanize } from "./ActionRowTools";
 import { ContactAvatar } from "./ContactAvatar";
 import { takeRecordWorkspace } from "./recordPrefetch";
@@ -230,7 +230,7 @@ export default function CrmRecordClient({ recordId, variant = "page" }: { record
         onCallStarted={() => setCallsRefreshKey((key) => key + 1)}
         moveStage={<MoveStageDialog
           categories={categories}
-          categoryKey={String(data.categoryKey ?? asObject(data.classification).category ?? "other")}
+          categoryKey={data.categoryKey ? String(data.categoryKey) : asObject(data.classification).category ? String(asObject(data.classification).category) : null}
           subcategoryId={data.subcategoryId ? String(data.subcategoryId) : null}
           contextVersion={Number(data.contextVersion)}
           onMove={(body) => mutate(`/records/${String(data.id)}/stage`, body, "POST", moveStageSuccessMessage(body))}
@@ -330,9 +330,9 @@ const WORKFLOW_BADGE: Record<string, { label: string; color: React.ComponentProp
   waiting: { label: "Waiting", color: "purple" },
   paused: { label: "Paused", color: "pink" },
   closed: { label: "Closed", color: "green" },
-  classifying: { label: "Classifying", color: "gray" },
-  unclassified: { label: "Unclassified", color: "gray" },
-  idle: { label: "Idle", color: "gray" },
+  classifying: { label: "Classifying", color: "teal" },
+  unclassified: { label: "Replied", color: "teal" },
+  idle: { label: "New lead", color: "gray" },
 };
 
 function RecordHeader({ back, data, person, name, avatarUrl, currentStep, activeRun, onAction, onCallStarted, moveStage }: {
@@ -371,7 +371,14 @@ function RecordHeader({ back, data, person, name, avatarUrl, currentStep, active
   // "Profile" label that hides which account it points at.
   const linkedinHref = linkedin.startsWith("http") ? linkedin : `https://www.linkedin.com/in/${linkedin}`;
   const linkedinSlug = linkedin.replace(/\/+$/, "").split("/").pop() || linkedin;
-  const state = WORKFLOW_BADGE[workflowState];
+  const headerDraft = asObject(data.draft);
+  const state = workflowState === "idle"
+    ? headerDraft.status === "awaiting_review" && Boolean(headerDraft.autoSendAt)
+      ? { label: "Queued", color: "sky" as const }
+      : Boolean(data.lastOutboundAt)
+        ? { label: "Contacted", color: "blue" as const }
+        : WORKFLOW_BADGE.idle
+    : WORKFLOW_BADGE[workflowState];
 
   return (
     <PageHeader
@@ -786,10 +793,22 @@ function InlineWarning({ tone, title, detail }: { tone: "warning" | "danger"; ti
  */
 function ClassificationSelect({ record, categories, onAction }: { record: Data; categories: Data[]; onAction: (path: string, body?: Data, method?: string, success?: string) => Promise<boolean> }) {
   const classification = asObject(record.classification);
-  const categoryKey = String(record.categoryKey ?? classification.category ?? "other");
+  const categoryKey = record.categoryKey
+    ? String(record.categoryKey)
+    : classification.category
+      ? String(classification.category)
+      : null;
   const subcategoryId = record.subcategoryId ? String(record.subcategoryId) : null;
+  const subcategoryName = record.subcategory ? String(record.subcategory) : null;
   const confidence = classification.confidence != null ? Math.round(Number(classification.confidence) * 100) : null;
   const reason = text(classification.reason);
+  const stageDisplay = deriveCrmRecordStageDisplay({
+    record,
+    draft: asObject(record.draft),
+    subcategoryName,
+    dnc: Boolean(record.dnc),
+  });
+  const stageStyle = LEAD_CRM_BADGE_STYLE[stageDisplay.kind];
 
   return (
     <div className="flex items-center gap-2">
@@ -800,8 +819,11 @@ function ClassificationSelect({ record, categories, onAction }: { record: Data; 
         categories={categories}
         categoryKey={categoryKey}
         subcategoryId={subcategoryId}
-        subcategoryName={record.subcategory ? String(record.subcategory) : null}
-        title="Fix classification — the AI misread this reply"
+        subcategoryName={subcategoryName}
+        placeholderLabel={stageDisplay.chip}
+        placeholderTone={stageStyle.tone}
+        placeholderDot={stageStyle.dot}
+        title={categoryKey ? "Fix classification — the AI misread this reply" : `${stageDisplay.chip} — click to set category manually`}
         onChange={(chosen) => void onAction(`/records/${String(record.id)}/classification`, {
           ...chosen,
           expectedContextVersion: record.contextVersion,

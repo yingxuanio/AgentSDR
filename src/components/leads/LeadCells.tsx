@@ -4,10 +4,10 @@
 import { useEffect, useRef, useState, type ComponentType, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { RiGlobalLine, RiLinkedinBoxFill, RiMailFill, RiPhoneFill, RiSparkling2Fill } from "@remixicon/react";
 import * as Tooltip from "@/components/alignui/tooltip";
-import { CHANNEL_META, CRM_CATEGORY_COLOR, HUE } from "@/components/analytics/theme";
-import { categoryColor } from "@/components/crm/crm-utils";
+import { CHANNEL_META, HUE } from "@/components/analytics/theme";
+import { LEAD_CRM_BADGE_STYLE } from "@/components/crm/crm-utils";
 import { cn } from "@/utils/cn";
-import { deriveLeadCrmDisplay, linkedInPersonHref, shortDate, type Campaign, type LeadCrmBadgeKind, type PersonRow } from "./leadTypes";
+import { deriveLeadCrmDisplay, linkedInPersonHref, shortDate, type Campaign, type PersonRow } from "./leadTypes";
 
 /** Stops a click on a control inside a clickable row from also opening the row. */
 export const stop = (event: MouseEvent | KeyboardEvent) => event.stopPropagation();
@@ -205,21 +205,6 @@ export function CampaignSummary({ campaigns, crm }: { campaigns: Campaign[]; crm
 
 // --------------------------------------------------------------------- CRM
 
-const CRM_BADGE_STYLE: Record<LeadCrmBadgeKind, { dot: string; tone: string }> = {
-  interested: { dot: CRM_CATEGORY_COLOR.interested, tone: categoryColor("interested").tone },
-  customer: { dot: CRM_CATEGORY_COLOR.customer, tone: categoryColor("customer").tone },
-  not_interested: { dot: CRM_CATEGORY_COLOR.not_interested, tone: categoryColor("not_interested").tone },
-  other: { dot: CRM_CATEGORY_COLOR.other, tone: categoryColor("other").tone },
-  dnc: { dot: HUE.red, tone: "bg-error-lighter text-error-dark ring-error-light" },
-  delivery_issue: { dot: HUE.red, tone: "bg-error-lighter text-error-dark ring-error-light" },
-  replied: { dot: HUE.teal, tone: "bg-success-lighter text-success-dark ring-success-light" },
-  queued: { dot: HUE.sky, tone: "bg-information-lighter text-information-dark ring-information-light" },
-  draft_ready: { dot: HUE.amber, tone: "bg-warning-lighter text-warning-dark ring-warning-light" },
-  contacted: { dot: HUE.blue, tone: "bg-information-lighter text-information-dark ring-information-light" },
-  closed: { dot: CRM_CATEGORY_COLOR.unclassified, tone: "bg-bg-weak-50 text-text-sub-600 ring-stroke-soft-200" },
-  new_lead: { dot: CRM_CATEGORY_COLOR.unclassified, tone: "bg-bg-weak-50 text-text-sub-600 ring-stroke-soft-200" },
-};
-
 /**
  * One chip in the category or outbound lifecycle stage's colour, plus a
  * secondary muted line with send/schedule/due context.
@@ -227,7 +212,7 @@ const CRM_BADGE_STYLE: Record<LeadCrmBadgeKind, { dot: string; tone: string }> =
 export function CrmSummary({ crm }: { crm: PersonRow["crm"] }) {
   if (!crm) return <Empty label="No CRM record" />;
   const display = deriveLeadCrmDisplay(crm);
-  const style = CRM_BADGE_STYLE[display.kind];
+  const style = LEAD_CRM_BADGE_STYLE[display.kind];
   const facts = display.secondary;
   return (
     <div className="min-w-0">

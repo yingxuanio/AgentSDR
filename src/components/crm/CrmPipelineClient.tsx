@@ -46,9 +46,9 @@ const STAGES = Object.keys(STAGE_META) as PipelineStage[];
 const BOARD_PAGE = 20;
 
 const EMPTY_COPY: Record<PipelineStage | "all", { title: string; detail: string }> = {
-  all: { title: "No open leads", detail: "Anyone who replies will show up here until their record is closed." },
-  needs_action: { title: "Nothing needs attention", detail: "New replies and due follow-ups land here." },
-  waiting: { title: "No one is waiting", detail: "Leads you have replied to, or with a follow-up scheduled, land here." },
+  all: { title: "No open leads", detail: "Active outreach leads and replies stay here until their CRM record is closed." },
+  needs_action: { title: "Nothing needs attention", detail: "Drafts awaiting review, new replies, and due follow-ups land here." },
+  waiting: { title: "No one is waiting", detail: "Leads with outreach sent, queued in working hours, or follow-ups scheduled land here." },
   exhausted: { title: "No exhausted sequences", detail: "Leads whose every follow-up went out without a reply land here." },
 };
 
