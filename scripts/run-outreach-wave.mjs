@@ -24,7 +24,7 @@ const CONCURRENCY = Number(getArg("--concurrency", "5"));
 const MODEL = getArg("--model", "gemini-3.8-flash-medium");
 const DELIVERY_MODE = getArg("--delivery", "send_paced");
 const PACE_MS = Number(getArg("--pace-ms", "8000"));
-const WORKER_TIMEOUT_SEC = Number(getArg("--worker-timeout", "600"));
+const WORKER_TIMEOUT_SEC = Number(getArg("--worker-timeout", "900"));
 
 const AGENTSDR_URL = process.env.AGENTSDR_URL || "http://127.0.0.1:13031";
 const AGENTSDR_API_KEY = process.env.AGENTSDR_API_KEY || "agentsdr_test_api_key_for_automation_2026";
@@ -149,7 +149,7 @@ function buildWorkerPrompt(shard, quota, waveWorkDir) {
    - 为了稳妥一次性达成 **${quota} 家** \`status: "sent"\`，建议一次搜集核验 **${quota + 1} 家** 候选一并写入 JSON 后执行一次 \`submit\`；若某条被跳过或拦截导致 \`sent < ${quota}\`，直接换新候选补齐差额再 \`submit\`（绝不排查原因），一旦累计 \`sent >= ${quota}\` 立即结束汇报！
 
 ### 二、客户画像与真实性硬红线（系统 API 会自动拦截违规项！）
-1. **严禁开拓软件 / IT / AI / 科技方案商**：凡软件开发、SaaS、AI、系统集成、MarTech、数码港/科学园纯技术公司一律排除！只选**主业非数字技术的实体制造、B2B贸易批发、消费品牌、物流工程、医疗器械等传统/垂直企业**（员工 <150 人中小型企业优先；避开跨国巨型上市公司）。
+1. **严禁开拓软件 / IT / AI / 科技方案商，且避开大型上市集团**：凡软件开发、SaaS、AI、系统集成、MarTech、数码港/科学园纯技术公司一律排除！同时避开跨国或港股/台股大型综合上市集团（如其士集团、龙记集团等千人级集团），只聚焦**员工 <150 人的中小型实体制造、B2B贸易批发、消费品牌、物流货代、医疗器械等传统/垂直企业**。
 2. **实名决策/负责人必填**：\`fullName\`（真实人名，严禁填 Desk/Team/客服/负责人等代称）+ \`title\`（如 Managing Director / Director / Founder / 董事長 / 總經理 / 負責人）必须有公开页面原文印证（可结合商会名录/台湾工商公开信息与官网交叉印证）。
 3. **100% 原文公开邮箱（系统会核验抓取证据库！）**：
    - \`email\` **必须原样出现在你本轮 \`search\` 或 \`scrape\` 抓到的页面中**（严禁猜测拼凑个人邮箱前缀！优先选择企业独立域名邮箱或 \`@hibox.hinet.net\`/\`@netvigator.com\` 商务邮箱，尽量少用免费 \`@gmail.com\` 除非是香港工业总会/金属制造业协会等官方名录登记邮箱）。
@@ -311,9 +311,10 @@ async function main() {
   let shardCursor = activeShardCount;
   const workerResults = [];
 
-  // Run initial wave with concurrency limit
+  // Run initial wave with concurrency limit and 2.5s launch stagger to avoid Firecrawl burst rate-limits
   let idx = 0;
-  const runners = Array.from({ length: Math.min(CONCURRENCY, initialTasks.length) }, async () => {
+  const runners = Array.from({ length: Math.min(CONCURRENCY, initialTasks.length) }, async (_, runnerIdx) => {
+    if (runnerIdx > 0) await new Promise((r) => setTimeout(r, runnerIdx * 2500));
     while (true) {
       const cur = idx++;
       if (cur >= initialTasks.length) break;

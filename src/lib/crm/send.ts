@@ -145,7 +145,10 @@ function providerErrorIsDefinite(error: unknown): boolean {
   // Nothing was submitted: the platform was never connected.
   if (error instanceof DefiniteCrmSendError || isPlatformNotConnectedError(error)) return true;
   if (!error || typeof error !== "object") return false;
-  const value = error as { code?: unknown; status?: unknown; response?: { status?: unknown } };
+  const value = error as { code?: unknown; status?: unknown; responseCode?: unknown; message?: unknown; response?: { status?: unknown } };
+  const smtpCode = Number(value.responseCode);
+  if (Number.isInteger(smtpCode) && smtpCode >= 550 && smtpCode <= 554) return true;
+  if (typeof value.message === "string" && /\b55[0-4]\s+RCPT\b|all recipients were rejected/i.test(value.message)) return true;
   const status = Number(value.status ?? value.response?.status ?? value.code);
   return Number.isInteger(status) && status >= 400 && status < 500 && ![408, 409, 425, 429].includes(status);
 }

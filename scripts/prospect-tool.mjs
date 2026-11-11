@@ -114,19 +114,44 @@ async function checkDomainsInCrm(domains) {
   }
 }
 
+async function fetchFirecrawlWithRetry(endpoint, payload, timeoutMs = 15000) {
+  let lastErr = "unknown";
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) {
+      const waitMs = (2500 * Math.pow(2, attempt - 1)) + Math.floor(Math.random() * 1200);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+    try {
+      const res = await fetch(`https://api.firecrawl.dev/v1/${endpoint}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (res.status === 429 || res.status >= 500) {
+        lastErr = `Firecrawl HTTP ${res.status}`;
+        continue;
+      }
+      const data = await res.json();
+      if (data?.success === false && /rate\s*limit|too\s*many/i.test(String(data?.error ?? ""))) {
+        lastErr = String(data.error);
+        continue;
+      }
+      return { ok: res.ok, status: res.status, data };
+    } catch (err) {
+      lastErr = String(err?.message ?? err);
+    }
+  }
+  throw new Error(lastErr);
+}
+
 async function searchOne(query) {
   try {
-    const res = await fetch("https://api.firecrawl.dev/v1/search", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query, limit: 6 }),
-      signal: AbortSignal.timeout(14000),
-    });
-    const data = await res.json();
-    const hits = (data.data ?? []).map((r) => {
+    const { data } = await fetchFirecrawlWithRetry("search", { query, limit: 6 }, 15000);
+    const hits = (data?.data ?? []).map((r) => {
       const text = `${r.title ?? ""} ${r.description ?? ""}`;
       const emails = extractEmails(text);
       if (r.url && emails.length) recordEvidence(r.url, emails, text);
@@ -138,7 +163,7 @@ async function searchOne(query) {
         emails: emails.length ? emails : undefined,
       };
     });
-    return { query, hits };
+    return { query, hits, ...(data?.success === false ? { error: data?.error } : {}) };
   } catch (err) {
     return { query, error: String(err?.message ?? err), hits: [] };
   }
@@ -146,21 +171,16 @@ async function searchOne(query) {
 
 async function scrapeOne(url) {
   try {
-    const res = await fetch("https://api.firecrawl.dev/v1/scrape", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const { data } = await fetchFirecrawlWithRetry(
+      "scrape",
+      {
         url,
         formats: ["markdown", "links"],
         onlyMainContent: false,
         timeout: 10000,
-      }),
-      signal: AbortSignal.timeout(14000),
-    });
-    const data = await res.json();
+      },
+      16000,
+    );
     const md = data?.data?.markdown ?? "";
     const links = Array.isArray(data?.data?.links) ? data.data.links : [];
     const mailtoEmails = links

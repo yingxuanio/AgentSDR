@@ -68,8 +68,8 @@ const CHINESE_ROMANIZED_SURNAMES = new Set([
   "lui", "luk", "lung", "ma", "mak", "man", "mo", "mok", "mui", "nam", "ng", "ngai",
   "ngan", "pak", "pang", "poon", "pun", "sham", "shek", "shum", "sin", "sit", "siu", "so",
   "suen", "sum", "sung", "sze", "szeto", "tai", "tam", "tang", "tin", "to", "tong", "tsang",
-  "tse", "tsoi", "tsui", "uen", "wai", "wan", "wat", "wong", "woo", "wu", "yam", "yan",
-  "yap", "yau", "yeung", "yim", "yin", "yip", "yiu", "yu", "yue", "yuen", "yung",
+  "tse", "tso", "tsoi", "tsui", "uen", "ung", "vong", "wai", "wan", "wat", "wong", "woo", "wu", "wut", "yam", "yan",
+  "yap", "yau", "yeung", "yim", "yin", "yip", "yiu", "yu", "yue", "yuen", "yung", "kot", "shiu", "shea", "ieong",
   // Mainland Pinyin & Taiwan Wade-Giles / Hokkien
   "ai", "an", "bai", "bao", "bi", "bian", "bu", "cai", "cao", "cen", "chai", "chang",
   "chao", "chen", "cheng", "chi", "chien", "chou", "chuang", "chueh", "cui", "dai", "deng",
