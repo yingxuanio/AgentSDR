@@ -719,6 +719,7 @@ export function describeAction(action: Action, categories: Data[], pipeline: boo
       draft,
       subcategoryName: subcategory.name ? String(subcategory.name) : null,
       dnc,
+      bounced: Boolean(action.bounced),
     },
     now,
   );

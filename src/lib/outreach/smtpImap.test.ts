@@ -68,7 +68,7 @@ describe("smtpImap MIME and RFC 5322 parser", () => {
     expect(parsed?.bodyText).toContain("Thanks for reaching out! Let's talk on Thursday.");
   });
 
-  it("ignores self-sent messages and auto-replies", () => {
+  it("ignores self-sent messages while retaining auto-replies (left-company / OOO / DSN)", () => {
     const selfSent = [
       `From: <sdr@linktion.cn>`,
       `To: <alex@example.com>`,
@@ -83,19 +83,22 @@ describe("smtpImap MIME and RFC 5322 parser", () => {
       }),
     ).toBeNull();
 
-    const ooo = [
-      `From: <alex@example.com>`,
+    const autoReply = [
+      `From: "Debbie Wut" <debbie@alphalogisticshk.com>`,
       `To: <sdr@linktion.cn>`,
-      `Subject: Out of Office`,
+      `Subject: Auto-Reply`,
       `Auto-Submitted: auto-replied`,
+      `In-Reply-To: <68877b8d-8981-4ab6-ba77-15f6680f7538@linktion.cn>`,
       ``,
-      `I am away`,
+      `Dear Sender,\r\n\r\nPlease be informed that Ms. Debbie is no longer with Alpha Logistics HK Ltd.`,
     ].join("\r\n");
-    expect(
-      parseRawEmailMessage(Buffer.from(ooo, "latin1"), {
-        uid: 44,
-        mailboxEmail: "sdr@linktion.cn",
-      }),
-    ).toBeNull();
+    const parsedAutoReply = parseRawEmailMessage(Buffer.from(autoReply, "latin1"), {
+      uid: 44,
+      mailboxEmail: "sdr@linktion.cn",
+    });
+    expect(parsedAutoReply).not.toBeNull();
+    expect(parsedAutoReply?.fromEmail).toBe("debbie@alphalogisticshk.com");
+    expect(parsedAutoReply?.threadId).toBe("<68877b8d-8981-4ab6-ba77-15f6680f7538@linktion.cn>");
+    expect(parsedAutoReply?.bodyText).toContain("no longer with Alpha Logistics HK Ltd.");
   });
 });

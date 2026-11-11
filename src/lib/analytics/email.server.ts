@@ -211,13 +211,29 @@ export async function getEmailAnalytics(range: AnalyticsRange): Promise<EmailAna
             count(DISTINCT r.person_id) FILTER (WHERE r.last_inbound_at IS NOT NULL)::int AS replied,
             (
               SELECT count(DISTINCT r2.person_id)::int
-              FROM crm_send_attempts sa2
-              JOIN crm_drafts d2 ON d2.id = sa2.draft_id
-              JOIN crm_records r2 ON r2.id = d2.crm_record_id
+              FROM crm_records r2
+              JOIN people p2 ON p2.id = r2.person_id AND p2.organization_id = ${org}
               WHERE r2.organization_id = ${org}
-                AND d2.channel = 'email'
-                AND (sa2.status IN ('failed', 'delivery_uncertain') OR (sa2.status = 'reconciled' AND sa2.provider_message_id IS NULL))
-                AND coalesce(sa2.error, '') ~* '(55[0-9]|5\\.[0-9]\\.[0-9]|rejected|does not exist|doesn''t exist|bounced|user unknown)'
+                AND NOT EXISTS (
+                  SELECT 1 FROM outreach_leads ol2
+                  WHERE ol2.person_id = r2.person_id AND ol2.id IN ${orgLeadIds}
+                )
+                AND (
+                  EXISTS (
+                    SELECT 1 FROM outreach_suppression_list sl
+                    WHERE sl.organization_id = ${org}
+                      AND lower(sl.email) = lower(p2.email)
+                      AND sl.reason = 'bounced'
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM crm_send_attempts sa2
+                    JOIN crm_drafts d2 ON d2.id = sa2.draft_id
+                    WHERE d2.crm_record_id = r2.id
+                      AND d2.channel = 'email'
+                      AND (sa2.status IN ('failed', 'delivery_uncertain') OR (sa2.status = 'reconciled' AND sa2.provider_message_id IS NULL))
+                      AND coalesce(sa2.error, '') ~* '(55[0-9]|5\\.[0-9]\\.[0-9]|rejected|does not exist|doesn''t exist|bounced|user unknown)'
+                  )
+                )
             ) AS bounced
           FROM crm_records r
           WHERE r.organization_id = ${org}

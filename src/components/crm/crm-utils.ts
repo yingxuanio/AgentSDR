@@ -61,10 +61,11 @@ export function deriveCrmRecordStageDisplay(
     draft?: Record<string, unknown> | null;
     subcategoryName?: string | null;
     dnc?: boolean;
+    bounced?: boolean;
   },
   nowMs = Date.now(),
 ): LeadCrmDisplay {
-  const { record, draft, subcategoryName, dnc } = input;
+  const { record, draft, subcategoryName, dnc, bounced } = input;
   const hasDraft = Boolean(draft && (draft.id || draft.status));
   return deriveLeadCrmDisplay(
     {
@@ -81,6 +82,7 @@ export function deriveCrmRecordStageDisplay(
       nextActionAt: record.nextActionAt ? String(record.nextActionAt) : null,
       unacknowledgedAiChange: Boolean(record.aiChanged),
       dnc: Boolean(dnc ?? record.dnc),
+      bounced: Boolean(bounced ?? record.bounced),
       latestDraft: hasDraft && draft
         ? {
             status: String(draft.status ?? ""),

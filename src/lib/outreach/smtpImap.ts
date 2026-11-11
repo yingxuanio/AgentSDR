@@ -975,12 +975,11 @@ export function parseRawEmailMessage(
     return null;
   }
 
-  // Skip automatic out-of-office / bounce loop notifications
-  const autoSubmitted = (headers.get("auto-submitted") ?? "").toLowerCase();
-  const xAutoReply = (headers.get("x-autoreply") ?? "").toLowerCase();
-  if ((autoSubmitted && autoSubmitted !== "no") || xAutoReply === "yes") {
-    return null;
-  }
+  // Note: Do NOT drop Auto-Submitted / X-Autoreply messages here. Standard
+  // RFC 3464 bounce DSNs, "no longer with company" notices, and OOO replies
+  // carry Auto-Submitted: auto-replied and must reach replyBridge + CRM AI
+  // classification (AgentSDR never blindly auto-responds without review, so
+  // there is no auto-responder loop risk).
 
   const { plain, html } = extractMimeText(rawMessage);
   const bodyText = (plain || (html ? stripHtmlSimple(html) : "")).trim();

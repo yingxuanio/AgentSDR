@@ -14,6 +14,7 @@ export type PersonCrmSummary = {
   nextActionAt: string | Date | null;
   unacknowledgedAiChange: boolean;
   dnc?: boolean;
+  bounced?: boolean;
   latestDraft?: {
     status: string;
     autoSendAt: string | Date | null;
@@ -139,6 +140,14 @@ export function deriveLeadCrmDisplay(crm: PersonCrmSummary, nowMs = Date.now()):
       kind: "dnc",
       chip: "Do not contact",
       secondary: crm.workflowState === "closed" ? "Closed" : null,
+    };
+  }
+
+  if (crm.bounced) {
+    return {
+      kind: "delivery_issue",
+      chip: "Bounced",
+      secondary: crm.workflowState === "closed" ? "Closed" : "Suppressed",
     };
   }
 
