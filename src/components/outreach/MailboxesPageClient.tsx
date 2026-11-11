@@ -28,7 +28,7 @@ export default function MailboxesPageClient({ mailboxes }: { mailboxes: Mailbox[
   const sentToday = mailboxes.reduce((sum, m) => sum + m.todayEmailsSent, 0);
   // Only a connected mailbox can send, so only its limit is capacity.
   const capacity = mailboxes.filter(healthy).reduce((sum, m) => sum + m.dailySendLimit, 0);
-  const left = Math.max(capacity - mailboxes.filter(healthy).reduce((sum, m) => sum + m.todayEmailsSent, 0), 0);
+  const left = mailboxes.filter(healthy).reduce((sum, m) => sum + Math.max(m.dailySendLimit - m.todayEmailsSent, 0), 0);
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();

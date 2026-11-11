@@ -6,6 +6,7 @@ import { connections as linkedinConnections, messages as linkedinMessages } from
 import { isPlatformConnected, isPlatformNotConnectedError } from "@/lib/platform/credentials";
 import { sendEmail } from "@/lib/outreach/gmail";
 import { mailboxes } from "@/lib/outreach/schema";
+import { isSameLocalDay } from "@/lib/outreach/workingHours";
 import { sendMessage as sendLinkedInMessage } from "@/services/unipile.service";
 import {
   deliverWhatsappFromCrm,
@@ -569,9 +570,26 @@ async function finishSuccessfulSend(
       updatedAt: now,
     }).where(eq(crmRecords.id, record.id));
     if (!reconciliation && attempt.actorType !== "system" && prepared.request.channel === "email") {
-      await tx.update(mailboxes)
-        .set({ todayEmailsSent: sql`${mailboxes.todayEmailsSent} + 1`, updatedAt: now })
-        .where(and(inOrg(mailboxes), eq(mailboxes.emailAddress, prepared.request.accountRef)));
+      const [mb] = await tx
+        .select({
+          id: mailboxes.id,
+          sendCounterResetAt: mailboxes.sendCounterResetAt,
+          workingHours: mailboxes.workingHours,
+        })
+        .from(mailboxes)
+        .where(and(inOrg(mailboxes), eq(mailboxes.emailAddress, prepared.request.accountRef)))
+        .limit(1);
+      if (mb) {
+        const sameDay = isSameLocalDay(mb.sendCounterResetAt, now, mb.workingHours.timezone);
+        await tx
+          .update(mailboxes)
+          .set(
+            sameDay
+              ? { todayEmailsSent: sql`${mailboxes.todayEmailsSent} + 1`, updatedAt: now }
+              : { todayEmailsSent: 1, sendCounterResetAt: now, updatedAt: now },
+          )
+          .where(eq(mailboxes.id, mb.id));
+      }
     }
     await tx.update(crmClassifications).set({ acknowledgedAt: now, updatedAt: now })
       .where(and(
