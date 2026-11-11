@@ -18,7 +18,13 @@ describe("manual People import", () => {
       title: null,
       companyName: null,
       companyDomain: null,
+      companyLinkedinUrl: null,
       companyCode: null,
+      companyRegion: null,
+      leadReason: null,
+      verificationNote: null,
+      companyCustom: {},
+      personCustom: {},
       notes: null,
       phone: null,
       workflowState: undefined,
@@ -27,6 +33,30 @@ describe("manual People import", () => {
       dnc: false,
       dncReason: "Set during ingestion",
       reviewAfter: null,
+    });
+  });
+
+  test("normalizes streamlined prospecting context fields into companyCustom and personCustom", () => {
+    const normalized = normalizeManualPersonInput({
+      email: "michael@ccw-global.com",
+      fullName: "Michael Lamb",
+      title: "CEO",
+      companyName: "CCW Global Limited",
+      companyDomain: "ccw-global.com",
+      companyLinkedinUrl: " https://www.linkedin.com/company/ccw-global/ ",
+      companyCode: " HK01 ",
+      companyRegion: " 香港｜上环 ",
+      leadReason: " 近期招募 Magic 保险比价平台兼职研发伙伴，适合从单阶段 API 报价集成切入 (https://ccw-global.com/careers) ",
+      verificationNote: " CEO 姓名与邮箱核验自官网管理团队页 https://www.ccw-global.com/about-us/our-team/ ",
+    });
+    assert.equal(normalized.companyLinkedinUrl, "https://www.linkedin.com/company/ccw-global/");
+    assert.deepEqual(normalized.companyCustom, {
+      x_code: "HK01",
+      x_region: "香港｜上环",
+      x_lead_reason: "近期招募 Magic 保险比价平台兼职研发伙伴，适合从单阶段 API 报价集成切入 (https://ccw-global.com/careers)",
+    });
+    assert.deepEqual(normalized.personCustom, {
+      x_verification_note: "CEO 姓名与邮箱核验自官网管理团队页 https://www.ccw-global.com/about-us/our-team/",
     });
   });
 

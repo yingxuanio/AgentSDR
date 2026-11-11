@@ -78,6 +78,19 @@ function toLeadColumn(row: ColumnRow): LeadColumn {
 
 /** Organizations whose core rows this process has already confirmed. */
 const coreEnsured = new Set<string>();
+const prospectingEnsured = new Set<string>();
+
+export const PROSPECTING_COLUMN_DEFS: readonly {
+  entity: LeadEntity;
+  key: string;
+  name: string;
+  type: LeadColumnType;
+}[] = [
+  { entity: "company", key: "x_code", name: "项目编号", type: "text" },
+  { entity: "company", key: "x_region", name: "地区/城市", type: "text" },
+  { entity: "company", key: "x_lead_reason", name: "录入理由与切入方案", type: "text" },
+  { entity: "person", key: "x_verification_note", name: "联系人核验依据", type: "text" },
+];
 
 /**
  * Get-or-create the organization's core registry rows (the 11 built-in
@@ -105,6 +118,35 @@ export async function ensureCoreColumns(): Promise<void> {
     .onConflictDoNothing({ target: [entityColumns.organizationId, entityColumns.entity, entityColumns.key] });
 
   coreEnsured.add(organizationId);
+}
+
+/**
+ * Ensure the streamlined prospecting context columns exist in `entity_columns`
+ * when API imports write `x_code`, `x_region`, `x_lead_reason`, or `x_verification_note`.
+ */
+export async function ensureProspectingColumns(
+  executor: Pick<typeof db, "insert"> = db,
+): Promise<void> {
+  const organizationId = currentOrganizationId();
+  if (prospectingEnsured.has(organizationId)) return;
+
+  await executor
+    .insert(entityColumns)
+    .values(
+      PROSPECTING_COLUMN_DEFS.map((def, i) => ({
+        organizationId,
+        entity: def.entity,
+        key: def.key,
+        name: def.name,
+        type: def.type,
+        pgType: PG_TYPE_FOR_COLUMN_TYPE[def.type],
+        isCore: false,
+        position: 100 + i,
+      })),
+    )
+    .onConflictDoNothing({ target: [entityColumns.organizationId, entityColumns.entity, entityColumns.key] });
+
+  prospectingEnsured.add(organizationId);
 }
 
 /**

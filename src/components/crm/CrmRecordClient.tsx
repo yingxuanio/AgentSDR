@@ -11,10 +11,13 @@ import {
   RiCheckboxCircleLine,
   RiCloseCircleLine,
   RiErrorWarningLine,
+  RiFileTextLine,
+  RiGlobalLine,
   RiHistoryLine,
   RiLinkedinLine,
   RiLoopLeftLine,
   RiMailLine,
+  RiMapPinLine,
   RiMoreLine,
   RiPauseLine,
   RiPhoneLine,
@@ -23,6 +26,7 @@ import {
   RiReplyLine,
   RiSaveLine,
   RiSendPlaneLine,
+  RiShieldCheckLine,
   RiSkipForwardLine,
   RiSparklingLine,
   RiTimerLine,
@@ -52,7 +56,7 @@ import {
   subtleButtonClass,
 } from "./CrmLayout";
 import { RecordBody } from "./CrmSkeletons";
-import { asList, asObject, crmFetch, displayName, errorMessage, formatDate, relativeDate } from "./crm-utils";
+import { asList, asObject, crmFetch, displayName, errorMessage, extractLeadContext, formatDate, relativeDate } from "./crm-utils";
 import { ClassificationPicker, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, humanize } from "./ActionRowTools";
 import { ContactAvatar } from "./ContactAvatar";
 import { takeRecordWorkspace } from "./recordPrefetch";
@@ -179,6 +183,8 @@ export default function CrmRecordClient({ recordId, variant = "page" }: { record
   if (error && !data.id) return <div className="space-y-6"><PageHeader back={variant === "page" ? BACK : undefined} title="Conversation" /><ErrorState message={error} onRetry={() => void load()} /></div>;
 
   const person = asObject(data.person);
+  const companyObj = asObject(data.company);
+  const leadContext = extractLeadContext(person, companyObj);
   const draft = asObject(data.draft);
   const conversations = asList<Data>(data.conversations);
   const events = asList<Data>(data.events);
@@ -240,6 +246,10 @@ export default function CrmRecordClient({ recordId, variant = "page" }: { record
         { label: "Sequence", value: activeSequence.name ? `${String(activeSequence.name)}${activeRun.status === "paused" ? " · paused" : ""}` : "None running", icon: RiLoopLeftLine },
         { label: channels.length > 1 ? "Channels" : "Channel", value: channels.join(", ") || "—", icon: RiChat3Line },
       ]} />
+
+      {(leadContext.leadReason || leadContext.verificationNote) && (
+        <LeadContextCard leadReason={leadContext.leadReason} verificationNote={leadContext.verificationNote} />
+      )}
 
       {/* The measured height only holds if the grid row is allowed to be
           smaller than its content: an auto row grows to the longest thread and
@@ -349,7 +359,11 @@ function RecordHeader({ back, data, person, name, avatarUrl, currentStep, active
   // Skipping needs a running sequence with a step to skip.
   const canSkip = !closed && !paused && activeRun.status === "active" && Boolean(currentStep.name);
   const title = text(person.title);
-  const company = text(person.company);
+  const companyRecord = asObject(data.company);
+  const company = text(person.company) || text(companyRecord.name);
+  const companyDomain = text(companyRecord.domain);
+  const companyHref = companyDomain ? (companyDomain.startsWith("http") ? companyDomain : `https://${companyDomain}`) : "";
+  const leadContext = extractLeadContext(person, companyRecord);
   const email = text(person.email);
   const phone = text(person.phone) || null;
   const linkedin = text(person.linkedinUrl);
@@ -367,11 +381,14 @@ function RecordHeader({ back, data, person, name, avatarUrl, currentStep, active
         <span className="truncate">{name}</span>
       </span>}
       badge={<>
+        {leadContext.companyCode && <Badge.Root variant="lighter" size="medium" color="gray">{leadContext.companyCode}</Badge.Root>}
         {state && <Badge.Root variant="lighter" size="medium" color={state.color}><Badge.Dot />{state.label}</Badge.Root>}
         {dnc && <Badge.Root variant="lighter" size="medium" color="red"><Badge.Dot />Do not contact</Badge.Root>}
       </>}
       description={<div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-paragraph-sm text-text-sub-600">
         {(title || company) && <span className="inline-flex min-w-0 items-center gap-1.5"><RiBriefcaseLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" /><span className="truncate">{[title, company].filter(Boolean).join(" · ")}</span></span>}
+        {companyDomain && <a href={companyHref} target="_blank" rel="noreferrer" className="inline-flex min-w-0 items-center gap-1.5 transition hover:text-text-strong-950"><RiGlobalLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" /><span className="truncate">{companyDomain}</span><RiArrowRightUpLine className="size-3.5 shrink-0 text-text-soft-400" aria-hidden="true" /></a>}
+        {leadContext.region && <span className="inline-flex items-center gap-1.5"><RiMapPinLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" /><span>{leadContext.region}</span></span>}
         {email && <a href={`mailto:${email}`} className="inline-flex min-w-0 items-center gap-1.5 transition hover:text-text-strong-950"><RiMailLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" /><span className="truncate">{email}</span></a>}
         {phone && <span className="inline-flex items-center gap-1.5"><RiPhoneLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" />{phone}</span>}
         {linkedin && <a href={linkedinHref} target="_blank" rel="noreferrer" title={`Open ${name} on LinkedIn`} className="inline-flex min-w-0 items-center gap-1.5 transition hover:text-text-strong-950"><RiLinkedinLine className="size-4 shrink-0 text-text-soft-400" aria-hidden="true" /><span className="truncate">{linkedinSlug}</span><RiArrowRightUpLine className="size-3.5 shrink-0 text-text-soft-400" aria-hidden="true" /></a>}
@@ -412,6 +429,54 @@ function RecordHeader({ back, data, person, name, avatarUrl, currentStep, active
         </Dropdown.Root>
       </>}
     />
+  );
+}
+
+const INLINE_URL_PATTERN = /(https?:\/\/[^\s)）\]"'>]+)/g;
+
+function renderTextWithLinks(content: string): React.ReactNode {
+  const parts = content.split(INLINE_URL_PATTERN);
+  return parts.map((part, index) => {
+    if (/^https?:\/\//.test(part)) {
+      return (
+        <a
+          key={index}
+          href={part}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-0.5 text-primary-base underline decoration-primary-alpha-24 underline-offset-2 transition hover:text-primary-dark"
+        >
+          <span className="break-all">{part}</span>
+          <RiArrowRightUpLine className="size-3.5 shrink-0" aria-hidden="true" />
+        </a>
+      );
+    }
+    return <span key={index}>{part}</span>;
+  });
+}
+
+function LeadContextCard({ leadReason, verificationNote }: { leadReason: string; verificationNote: string }) {
+  return (
+    <div className="grid gap-2.5 rounded-xl bg-bg-weak-50 px-4 py-3 text-paragraph-xs text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200 lg:grid-cols-2">
+      {leadReason && (
+        <div className="flex min-w-0 items-start gap-2">
+          <RiFileTextLine className="mt-0.5 size-4 shrink-0 text-text-soft-400" aria-hidden="true" />
+          <div className="min-w-0">
+            <span className="font-medium text-text-strong-950">录入理由与切入方案：</span>
+            <span className="leading-5">{renderTextWithLinks(leadReason)}</span>
+          </div>
+        </div>
+      )}
+      {verificationNote && (
+        <div className="flex min-w-0 items-start gap-2">
+          <RiShieldCheckLine className="mt-0.5 size-4 shrink-0 text-success-base" aria-hidden="true" />
+          <div className="min-w-0">
+            <span className="font-medium text-text-strong-950">联系人核验依据：</span>
+            <span className="leading-5">{renderTextWithLinks(verificationNote)}</span>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

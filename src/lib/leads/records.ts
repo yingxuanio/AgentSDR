@@ -12,7 +12,7 @@ import { currentOrganizationId, inOrg } from "@/lib/tenancy/scope";
 export type LeadTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type LeadExecutor = Pick<LeadTransaction, "select" | "insert" | "update" | "delete" | "execute">;
 type PersonSnapshot = Pick<typeof people.$inferSelect,
-  "id" | "email" | "linkedinUrl" | "firstName" | "lastName" | "fullName" | "title" | "profilePictureUrl" | "phone" | "companyId" | "raw"
+  "id" | "email" | "linkedinUrl" | "firstName" | "lastName" | "fullName" | "title" | "profilePictureUrl" | "phone" | "companyId" | "custom" | "raw"
 >;
 export type LeadMutationContext = {
   companyCache?: Map<string, typeof companies.$inferSelect>;
@@ -34,8 +34,10 @@ export type CanonicalPersonInput = {
     domain?: string | null;
     name?: string | null;
     linkedinUrl?: string | null;
+    custom?: Record<string, unknown>;
     raw?: Record<string, unknown>;
   } | null;
+  custom?: Record<string, unknown>;
   raw?: Record<string, unknown>;
   source: string;
 };
@@ -117,9 +119,21 @@ export async function upsertCompany(
   if (!domain) return null;
 
   const rawValues = input.raw ?? {};
-  const customValues: Record<string, unknown> = {};
-  if (typeof rawValues.x_code === "string") customValues.x_code = rawValues.x_code;
-  if (typeof rawValues.company_code === "string") customValues.x_code = rawValues.company_code;
+  const customValues: Record<string, unknown> = Object.fromEntries(
+    Object.entries(input.custom ?? {}).filter(([, value]) => value !== undefined && value !== null && value !== ""),
+  );
+  if (typeof rawValues.x_code === "string" && rawValues.x_code.trim() && customValues.x_code === undefined) {
+    customValues.x_code = rawValues.x_code.trim();
+  }
+  if (typeof rawValues.company_code === "string" && rawValues.company_code.trim() && customValues.x_code === undefined) {
+    customValues.x_code = rawValues.company_code.trim();
+  }
+  if (typeof rawValues.x_region === "string" && rawValues.x_region.trim() && customValues.x_region === undefined) {
+    customValues.x_region = rawValues.x_region.trim();
+  }
+  if (typeof rawValues.x_lead_reason === "string" && rawValues.x_lead_reason.trim() && customValues.x_lead_reason === undefined) {
+    customValues.x_lead_reason = rawValues.x_lead_reason.trim();
+  }
 
   const values = {
     name: clean(input.name),
@@ -130,7 +144,8 @@ export async function upsertCompany(
   if (cached) {
     const unchanged = (values.name === null || cached.name === values.name)
       && (values.linkedinUrl === null || cached.linkedinUrl === values.linkedinUrl)
-      && Object.entries(values.raw).every(([key, value]) => cached.raw?.[key] === value);
+      && Object.entries(values.raw).every(([key, value]) => cached.raw?.[key] === value)
+      && Object.entries(customValues).every(([key, value]) => cached.custom?.[key] === value);
     if (unchanged) return cached;
     const [updated] = await tx
       .update(companies)
@@ -204,6 +219,9 @@ export async function upsertPerson(tx: LeadExecutor, input: CanonicalPersonInput
     ?? (linkedinUrl ? matches.find((row) => row.linkedinUrl === linkedinUrl) : undefined);
   if (existing) assertCompatiblePersonIdentities(existing, { email, linkedinUrl });
   const names = resolvePersonNames(input, existing, { replaceExisting: context?.replaceNames });
+  const customValues: Record<string, unknown> = Object.fromEntries(
+    Object.entries(input.custom ?? {}).filter(([, value]) => value !== undefined && value !== null && value !== ""),
+  );
   const next = {
     email,
     linkedinUrl,
@@ -212,6 +230,7 @@ export async function upsertPerson(tx: LeadExecutor, input: CanonicalPersonInput
     profilePictureUrl: clean(input.profilePictureUrl),
     phone: clean(input.phone),
     companyId: company?.id ?? null,
+    custom: customValues,
     raw: {
       ...personRawFromInput(input),
       ...(!company && input.company?.name ? { company: clean(input.company.name), companyName: clean(input.company.name) } : {}),
@@ -232,6 +251,7 @@ export async function upsertPerson(tx: LeadExecutor, input: CanonicalPersonInput
         profilePictureUrl: next.profilePictureUrl ?? existing.profilePictureUrl,
         phone: next.phone ?? existing.phone,
         companyId: next.companyId ?? existing.companyId,
+        custom: Object.keys(customValues).length ? { ...(existing.custom ?? {}), ...customValues } : existing.custom,
         raw: mergePersonRaw(existing.raw, next.raw),
         updatedAt: new Date(),
       })

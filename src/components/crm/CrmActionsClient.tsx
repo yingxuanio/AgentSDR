@@ -57,7 +57,7 @@ import { ContactAvatar } from "./ContactAvatar";
 import { ErrorState, primaryButtonClass, secondaryButtonClass } from "./CrmLayout";
 import { RowsSkeleton } from "./CrmSkeletons";
 import { CategoryDot, ClassificationPicker, HoverPreview, HoverPreviewProvider, InlineDraftEditor, MoveStageDialog, moveStageSuccessMessage, RegenerateDraftDialog, humanize, type MoveStageBody, type RowMutation } from "./ActionRowTools";
-import { asList, asObject, CATEGORY_LABELS, crmFetch, displayName, errorMessage, formatDate, relativeDate, timeAgo } from "./crm-utils";
+import { asList, asObject, CATEGORY_LABELS, crmFetch, displayName, errorMessage, extractLeadContext, formatDate, relativeDate, timeAgo } from "./crm-utils";
 import { prefetchRecordWorkspace } from "./recordPrefetch";
 import { useRecordChanged } from "./recordEvents";
 import { publishRecordQueue, withdrawRecordQueue, type RecordQueue } from "./recordQueue";
@@ -676,12 +676,20 @@ export function describeAction(action: Action, categories: Data[], pipeline: boo
     : dueState === "follow_up" ? RiCalendarScheduleLine
     : RiTimeLine;
   const name = displayName({ ...action, ...record });
+  const personTitle = typeof person.title === "string" && person.title.trim() ? person.title.trim() : "";
   // The channel already shows on the avatar, so the line under the name says
   // which company this is — its domain, or the email's when no company is
   // linked — rather than repeating the address or profile URL.
   const companyDomain = company.domain ? String(company.domain)
     : person.email ? String(person.email).split("@")[1] ?? "" : "";
-  const companyLabel = companyDomain || (company.name ? String(company.name) : "");
+  const companyName = company.name ? String(company.name).trim() : "";
+  const companyLabel = [personTitle, companyName || companyDomain].filter(Boolean).join(" · ");
+  const leadContext = extractLeadContext(person, company);
+  const leadContextSummary = leadContext.leadReason || leadContext.verificationNote;
+  const leadContextFull = [
+    leadContext.leadReason ? `录入理由与切入方案：\n${leadContext.leadReason}` : "",
+    leadContext.verificationNote ? `联系人核验依据：\n${leadContext.verificationNote}` : "",
+  ].filter(Boolean).join("\n\n");
   const latestReplyFull = String(inbound.bodyText ?? action.latestInboundExcerpt ?? "").trim();
   const latestReply = String(action.latestInboundExcerpt ?? "").replace(/\s+/g, " ").trim();
   // The draft is the thing a reviewer actually opens the row for, so it
@@ -710,6 +718,7 @@ export function describeAction(action: Action, categories: Data[], pipeline: boo
     id, href, record, person, activeRun, inbound, subcategory, classification, category, channel, stage,
     proposedCategoryKey, proposedSubcategoryId, proposedLabel, keepCategoryKey, keepSubcategoryId,
     dueLabel, dueDetail, dueColor, dueIcon, actionText, name, companyDomain, companyLabel,
+    leadContext, leadContextSummary, leadContextFull,
     latestReplyFull, latestReply, draft, draftFull, draftReply, editable, repliedAt, sequenceLabel, stepLabel, sendableDraft, draftState,
     avatarUrl: person.profilePictureUrl ? String(person.profilePictureUrl) : null,
   };
@@ -789,8 +798,17 @@ function ChannelMark({ channel, className }: { channel: string; className?: stri
   return <span className={cn("flex shrink-0", className)} style={{ color: meta.color }} title={meta.label}><Icon className="size-3.5" aria-hidden="true" /></span>;
 }
 
-/** Their last message as a quote, with where and when it arrived underneath. */
+/** Their last message as a quote, with where and when it arrived underneath (falls back to lead context before first reply). */
 function ReplyQuote({ row, lines = 1 }: { row: Row; lines?: 1 | 2 }) {
+  if (!row.latestReply && row.leadContextSummary) {
+    return <div className="min-w-0 border-l-2 border-primary-alpha-24 pl-2.5">
+      <p className={cn("text-paragraph-sm text-text-sub-600", lines === 1 ? "truncate" : "line-clamp-2")}>{row.leadContextSummary}</p>
+      <p className="mt-0.5 flex items-center gap-1.5 text-paragraph-xs text-text-soft-400">
+        <span>录入依据</span>
+        {row.leadContext.region && <><span>·</span><span className="truncate">{row.leadContext.region}</span></>}
+      </p>
+    </div>;
+  }
   return <div className="min-w-0 border-l-2 border-stroke-soft-200 pl-2.5">
     <p className={cn("text-paragraph-sm", lines === 1 ? "truncate" : "line-clamp-2", row.latestReply ? "text-text-strong-950" : "italic text-text-soft-400")}>{row.latestReply || "No message text"}</p>
     <p className="mt-0.5 flex items-center gap-1.5 text-paragraph-xs text-text-sub-600">
@@ -903,7 +921,11 @@ function ActionRow({ action, categories, busy, editing, pipeline, now, onOpen, o
         <ClassificationCell row={row} categories={categories} busy={busy} onClassify={onClassify} />
       </Table.Cell>
       <Table.Cell className="px-4 py-3">
-        <HoverPreview title={String(row.inbound.subject ?? "").trim() || row.name} meta={formatDate(row.inbound.sentAt ?? row.repliedAt)} body={row.latestReplyFull}>
+        <HoverPreview
+          title={row.latestReplyFull ? (String(row.inbound.subject ?? "").trim() || row.name) : `${row.name}${row.leadContext.companyCode ? ` · ${row.leadContext.companyCode}` : ""}`}
+          meta={row.latestReplyFull ? formatDate(row.inbound.sentAt ?? row.repliedAt) : (row.leadContext.region || "拓客录入依据")}
+          body={row.latestReplyFull || row.leadContextFull}
+        >
           <ReplyQuote row={row} />
         </HoverPreview>
       </Table.Cell>

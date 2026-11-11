@@ -127,3 +127,38 @@ export function badgeClass(value: string): string {
   if (value === "not_interested" || value === "error") return "bg-error-lighter text-error-dark";
   return "bg-bg-weak-50 text-text-sub-600";
 }
+
+function cleanText(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+export function extractLeadContext(
+  person: Record<string, unknown>,
+  company: Record<string, unknown>,
+) {
+  const personCustom = asObject(person.custom);
+  const companyCustom = asObject(company.custom);
+  const companyRaw = asObject(company.raw);
+
+  const companyCode = cleanText(companyCustom.x_code)
+    || cleanText(companyCustom.company_code)
+    || cleanText(companyRaw.x_code)
+    || cleanText(companyRaw.company_code);
+  const region = cleanText(companyCustom.x_region) || cleanText(companyRaw.x_region);
+
+  const fallbackLegacyReason = [
+    [cleanText(companyCustom.x_signal_date), cleanText(companyCustom.x_signal_type)].filter(Boolean).join(" · "),
+    cleanText(companyCustom.x_tech_stack),
+    cleanText(companyCustom.x_pitch_angle),
+  ].filter(Boolean).join(" ｜ ");
+
+  const leadReason = cleanText(companyCustom.x_lead_reason) || fallbackLegacyReason;
+  const verificationNote = cleanText(personCustom.x_verification_note);
+
+  return {
+    companyCode,
+    region,
+    leadReason,
+    verificationNote,
+  };
+}
