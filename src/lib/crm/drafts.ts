@@ -592,6 +592,7 @@ const FALLBACK_STEP_INSTRUCTIONS = [
 const OUTBOUND_FALLBACK_STEP_INSTRUCTIONS = [
   "This is an initial outbound outreach draft (no inbound reply yet).",
   "Write or refine a concise, high-trust outreach message tailored to the person and company profile, knowledge excerpts, and any reviewer feedback or previous draft.",
+  "Include a brief, credible overview of our AI-first engineering workflow and core team background grounded in the supplied knowledge and operator instructions, rather than generic outsourcing boilerplate.",
   "Prioritize Chinese for contacts in Chinese-speaking regions (Hong Kong, Taiwan, Macau -> Traditional Chinese; Mainland China -> Simplified Chinese) unless the contact is clearly a non-Chinese expatriate or bound to an English sender.",
   "Match the language, brand identity, sign-off, and verified reference links to the bound sender account and operator brand-routing instructions (for example, Traditional Chinese as 英选 for HK/TW/Macau leads and Simplified Chinese as 英选 for Mainland China leads when sending from a Yingxuan mailbox, or English as Linktion when sending from a Linktion mailbox).",
   "Use only facts present in the person/company attributes, knowledge excerpts, or previous draft — never invent product details, pricing, availability, names, dates or commitments.",
