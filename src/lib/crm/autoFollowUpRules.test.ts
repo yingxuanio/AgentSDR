@@ -59,6 +59,32 @@ describe("autoFollowUpVerdict", () => {
     expect(autoFollowUpVerdict(candidate({ runActive: false }), now)).toEqual({ verdict: "wait" });
     expect(autoFollowUpVerdict(candidate({ stepAwaitingReview: false }), now)).toEqual({ verdict: "wait" });
   });
+
+  test("a scheduled direct send in waiting state sends without requiring active sequence", () => {
+    expect(autoFollowUpVerdict(candidate({
+      isScheduledDirectSend: true,
+      sequenceAutoSend: false,
+      runActive: false,
+      stepAwaitingReview: false,
+      workflowState: "waiting",
+      contextCurrent: true,
+    }), now)).toEqual({ verdict: "send" });
+  });
+
+  test("a scheduled direct send with stale context waits", () => {
+    expect(autoFollowUpVerdict(candidate({
+      isScheduledDirectSend: true,
+      contextCurrent: false,
+    }), now)).toEqual({ verdict: "wait" });
+  });
+
+  test("a scheduled direct send that exceeds 48 hours goes to rep", () => {
+    const old = new Date(now.getTime() - AUTO_FOLLOW_UP_HANDOFF_MS - 60_000);
+    expect(autoFollowUpVerdict(candidate({
+      isScheduledDirectSend: true,
+      autoSendAt: old,
+    }), now)).toEqual({ verdict: "hand_to_rep", reason: "not_sent_in_48_hours" });
+  });
 });
 
 describe("oldestPerAccount", () => {

@@ -90,3 +90,54 @@ export function mailboxHoursFromWeekly(hours: WeeklyHours): WorkingHours {
   ) as WorkingHours["days"];
   return { timezone: hours.timezone, days };
 }
+
+/**
+ * Calculates the next window start timestamp (in UTC Date).
+ * If `now` is already within working hours, returns `now`.
+ * Otherwise, scans the upcoming 8 days to find the next enabled window start.
+ */
+export function nextWorkingWindowStart(workingHours: WorkingHours, now: Date = new Date()): Date {
+  if (isWithinWorkingHours(workingHours, now)) {
+    return now;
+  }
+
+  const timezone = workingHours.timezone || "UTC";
+  const zonedNow = toZonedTime(now, timezone);
+
+  for (let offset = 0; offset < 8; offset++) {
+    const candidateZoned = addDays(zonedNow, offset);
+    const dayName = DAY_NAMES[candidateZoned.getDay()];
+    const day = workingHours.days[dayName];
+    if (!day?.enabled) continue;
+
+    const { hours: sh, minutes: sm } = parseHHmm(day.from);
+    const { hours: eh, minutes: em } = parseHHmm(day.to);
+
+    const startLocal = setTime(candidateZoned, { hours: sh, minutes: sm, seconds: 0, milliseconds: 0 });
+    const endLocal = setTime(candidateZoned, { hours: eh, minutes: em, seconds: 0, milliseconds: 0 });
+
+    let actualStartLocal = startLocal;
+    let actualEndLocal = endLocal;
+
+    if (endLocal <= startLocal) {
+      if (offset === 0 && candidateZoned <= endLocal) {
+        actualStartLocal = addDays(startLocal, -1);
+        actualEndLocal = endLocal;
+      } else {
+        actualEndLocal = addDays(endLocal, 1);
+      }
+    }
+
+    const startUtc = fromZonedTime(actualStartLocal, timezone);
+    const endUtc = fromZonedTime(actualEndLocal, timezone);
+
+    if (now < startUtc) {
+      return startUtc;
+    }
+    if (now >= startUtc && now < endUtc) {
+      return now;
+    }
+  }
+
+  return now;
+}

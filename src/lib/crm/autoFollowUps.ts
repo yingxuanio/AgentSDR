@@ -236,13 +236,14 @@ async function dueCandidates(now: Date, account?: { channel: CrmChannel; account
       runStatus: crmSequenceRuns.status,
       stepStatus: crmSequenceStepRuns.status,
       sequenceAutoSend: crmSequences.autoSendFollowUps,
+      sequenceStepRunId: crmDrafts.sequenceStepRunId,
     })
     .from(crmDrafts)
     .innerJoin(crmRecords, eq(crmRecords.id, crmDrafts.crmRecordId))
     .innerJoin(crmConversations, eq(crmConversations.id, crmDrafts.conversationId))
-    .innerJoin(crmSequenceStepRuns, eq(crmSequenceStepRuns.id, crmDrafts.sequenceStepRunId))
-    .innerJoin(crmSequenceRuns, eq(crmSequenceRuns.id, crmSequenceStepRuns.sequenceRunId))
-    .innerJoin(crmSequences, eq(crmSequences.id, crmSequenceRuns.sequenceId))
+    .leftJoin(crmSequenceStepRuns, eq(crmSequenceStepRuns.id, crmDrafts.sequenceStepRunId))
+    .leftJoin(crmSequenceRuns, eq(crmSequenceRuns.id, crmSequenceStepRuns.sequenceRunId))
+    .leftJoin(crmSequences, eq(crmSequences.id, crmSequenceRuns.sequenceId))
     .where(and(
       inOrg(crmRecords),
       eq(crmDrafts.status, "awaiting_review"),
@@ -258,11 +259,12 @@ async function dueCandidates(now: Date, account?: { channel: CrmChannel; account
     channel: row.channel,
     accountRef: row.accountRef,
     autoSendAt: row.autoSendAt!,
-    sequenceAutoSend: row.sequenceAutoSend,
+    sequenceAutoSend: row.sequenceAutoSend ?? false,
     workflowState: row.workflowState,
     runActive: row.runStatus === "active",
     stepAwaitingReview: row.stepStatus === "awaiting_review",
     contextCurrent: row.contextVersion === row.expectedContextVersion,
+    isScheduledDirectSend: row.sequenceStepRunId === null,
   }));
 }
 
