@@ -4,7 +4,7 @@
  *
  * Auth: CURSOR_API_KEY (Dashboard → API Keys). Never hardcode or read .env files.
  * Permissions: no --force / --yolo / --dangerously-skip-permissions. Prefer project
- * `.cursor/cli.json` allowlist (Shell(node) for prospect-tool) under approvalMode allowlist.
+ * `.cursor/cli.json` allowlist with precise `Shell(node:<script> <subcommand>*)` rules (not bare Shell(node)/Shell(node*)) under approvalMode allowlist.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -50,7 +50,7 @@ export function assertNoPermissionBypass(argv = []) {
   for (const a of argv) {
     if (FORBIDDEN_SKIP_FLAGS.includes(a)) {
       throw new Error(
-        `Refusing permission-bypass flag "${a}". Use .cursor/cli.json permissions.allow (Shell(node) for prospect-tool) instead of --force/--yolo/--dangerously-skip-permissions.`,
+        `Refusing permission-bypass flag "${a}". Use .cursor/cli.json precise Shell(node:scripts/… subcommand*) allow rules instead of --force/--yolo/--dangerously-skip-permissions.`,
       );
     }
   }
