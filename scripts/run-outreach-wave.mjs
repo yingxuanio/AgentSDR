@@ -3,46 +3,114 @@
  * Autonomous AGY Outreach Wave Orchestrator & Telemetry Auditor
  *
  * Guides parallel sharded `agy` CLI workers to discover, verify, import, draft,
- * quality-audit, and send personalized outreach emails via AgentSDR within < 1 hour.
+ * quality-audit, and (only when explicitly requested) send personalized outreach
+ * emails via AgentSDR.
  *
  * Usage:
- *   node scripts/run-outreach-wave.mjs --target 25 --concurrency 5 --model gemini-3.8-flash-medium --delivery send_paced --pace-ms 8000
+ *   node scripts/run-outreach-wave.mjs --help
+ *   node scripts/run-outreach-wave.mjs --target 10 --concurrency 2 --delivery draft_only
+ *   OUTREACH_DELIVERY_MODE is also set for workers from --delivery.
+ *
+ * Safety: --delivery defaults to draft_only. send_now / send_paced require an
+ * explicit flag and must not run without Ivan's batch approval.
+ *
+ * Never reads .env / Mac mini absolute paths. Requires AGENTSDR_URL,
+ * AGENTSDR_API_KEY, FIRECRAWL_API_KEY, and a resolvable prospect-tool path.
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 
 const args = process.argv.slice(2);
 function getArg(flag, fallback) {
   const i = args.indexOf(flag);
   return i >= 0 && args[i + 1] ? args[i + 1] : fallback;
 }
+function hasFlag(flag) {
+  return args.includes(flag);
+}
+
+const VALID_DELIVERY = new Set([
+  "draft_only",
+  "queue_working_hours",
+  "send_now",
+  "send_paced",
+]);
+
+function printHelp() {
+  console.log(`Usage: node scripts/run-outreach-wave.mjs [options]
+
+Options:
+  --help                 Show this help and exit (no network, no workers)
+  --target <n>           Lead quota (default 25)
+  --concurrency <n>      Parallel AGY workers (default 5)
+  --model <id>           AGY model id
+  --delivery <mode>      draft_only (default) | queue_working_hours | send_now | send_paced
+  --pace-ms <ms>         Pace for send_paced (default 8000)
+  --worker-timeout <s>   Per-worker AGY timeout seconds (default 900)
+  --prospect-tool <path> Path to prospect-tool.mjs (default: sibling of this script)
+
+Required env:
+  AGENTSDR_URL           Production/API base, e.g. https://sdr.linktion.cn
+  AGENTSDR_API_KEY       Org API key (no hardcoded fallback)
+  FIRECRAWL_API_KEY      Firecrawl key (env only; never read from a local .env path)
+  agy                    Must be on PATH (or AGY_BIN)
+
+Safety:
+  Default delivery is draft_only — drafts only, no send.
+  Cycle / paced sending must stay off until explicitly approved.`);
+}
+
+if (hasFlag("--help") || hasFlag("-h")) {
+  printHelp();
+  process.exit(0);
+}
 
 const TARGET_COUNT = Number(getArg("--target", "25"));
 const CONCURRENCY = Number(getArg("--concurrency", "5"));
 const MODEL = getArg("--model", "gemini-3.8-flash-medium");
-const DELIVERY_MODE = getArg("--delivery", "send_paced");
+const DELIVERY_MODE = getArg("--delivery", "draft_only");
 const PACE_MS = Number(getArg("--pace-ms", "8000"));
 const WORKER_TIMEOUT_SEC = Number(getArg("--worker-timeout", "900"));
 
-const AGENTSDR_URL = process.env.AGENTSDR_URL || "http://127.0.0.1:13031";
-const AGENTSDR_API_KEY = process.env.AGENTSDR_API_KEY || "agentsdr_test_api_key_for_automation_2026";
-const PROSPECT_TOOL = "/Users/ivan/projects/AgentSDR/scripts/prospect-tool.mjs";
-
-const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY || (() => {
-  try {
-    const envText = fs.readFileSync("/Users/ivan/projects/lumina-labs-agent/.env.local", "utf8");
-    const m = envText.match(/^FIRECRAWL_API_KEY=(.+)$/m);
-    return m ? m[1].trim().replace(/^['"]|['"]$/g, "") : "";
-  } catch {
-    return "";
-  }
-})();
-
-if (!FIRECRAWL_API_KEY) {
-  console.error("Missing FIRECRAWL_API_KEY");
+if (!VALID_DELIVERY.has(DELIVERY_MODE)) {
+  console.error(
+    `Invalid --delivery "${DELIVERY_MODE}". Expected: draft_only | queue_working_hours | send_now | send_paced`,
+  );
   process.exit(1);
+}
+
+const AGENTSDR_URL = (process.env.AGENTSDR_URL || "").trim();
+const AGENTSDR_API_KEY = (process.env.AGENTSDR_API_KEY || "").trim();
+const FIRECRAWL_API_KEY = (process.env.FIRECRAWL_API_KEY || "").trim();
+const AGY_BIN = (process.env.AGY_BIN || "agy").trim();
+
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const defaultProspectTool = path.join(scriptDir, "prospect-tool.mjs");
+const PROSPECT_TOOL = getArg("--prospect-tool", process.env.PROSPECT_TOOL || defaultProspectTool);
+
+if (!AGENTSDR_URL) {
+  console.error("Missing AGENTSDR_URL (e.g. https://sdr.linktion.cn). No localhost default.");
+  process.exit(1);
+}
+if (!AGENTSDR_API_KEY) {
+  console.error("Missing AGENTSDR_API_KEY. Set a real org API key; no hardcoded fallback.");
+  process.exit(1);
+}
+if (!FIRECRAWL_API_KEY) {
+  console.error("Missing FIRECRAWL_API_KEY (env only; refusing to read any .env file path).");
+  process.exit(1);
+}
+if (!fs.existsSync(PROSPECT_TOOL)) {
+  console.error(`prospect-tool not found at ${PROSPECT_TOOL}`);
+  process.exit(1);
+}
+if (DELIVERY_MODE === "send_now" || DELIVERY_MODE === "send_paced") {
+  console.warn(
+    `[safety] delivery=${DELIVERY_MODE} will send mail. Proceed only with an approved batch.`,
+  );
 }
 
 const SHARDS = [
@@ -277,7 +345,7 @@ function runSingleWorker({ shard, quota, waveWorkDir, evidenceFile, claimsDir, w
     const logPath = path.join(waveWorkDir, `worker-${shard.id}.log`);
 
     const child = spawn(
-      "/Users/ivan/.local/bin/agy",
+      AGY_BIN,
       [
         "--model",
         MODEL,

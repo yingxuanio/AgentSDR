@@ -7,28 +7,57 @@
  *   node prospect-tool.mjs scrape "https://..." "https://..." ...
  *   node prospect-tool.mjs check "domain1.com" "domain2.com.hk" ...
  *   node prospect-tool.mjs submit /path/to/leads.json
+ *
+ * Delivery (submit only): OUTREACH_DELIVERY_MODE =
+ *   draft_only (default; safe) | queue_working_hours | send_now | send_paced
+ * Sending modes require an explicit env value — never inferred from a missing flag.
+ *
+ * Required env for CRM calls: AGENTSDR_URL, AGENTSDR_API_KEY
+ * Required env for search/scrape: FIRECRAWL_API_KEY
+ * Never reads .env / Mac mini absolute paths.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY || (() => {
-  try {
-    const envText = fs.readFileSync("/Users/ivan/projects/lumina-labs-agent/.env.local", "utf8");
-    const m = envText.match(/^FIRECRAWL_API_KEY=(.+)$/m);
-    return m ? m[1].trim().replace(/^['"]|['"]$/g, "") : "";
-  } catch {
-    return "";
-  }
-})();
+const VALID_DELIVERY = new Set([
+  "draft_only",
+  "queue_working_hours",
+  "send_now",
+  "send_paced",
+]);
 
-const AGENTSDR_URL = process.env.AGENTSDR_URL || "http://127.0.0.1:13031";
-const AGENTSDR_API_KEY = process.env.AGENTSDR_API_KEY || "agentsdr_test_api_key_for_automation_2026";
+const FIRECRAWL_API_KEY = (process.env.FIRECRAWL_API_KEY || "").trim();
+const AGENTSDR_URL = (process.env.AGENTSDR_URL || "").trim();
+const AGENTSDR_API_KEY = (process.env.AGENTSDR_API_KEY || "").trim();
 const EVIDENCE_FILE = process.env.PROSPECT_EVIDENCE_FILE || "/tmp/agy-prospect-evidence.ndjson";
 const CLAIMS_DIR = process.env.PROSPECT_CLAIMS_DIR || "";
 const SHARD_ID = process.env.PROSPECT_SHARD_ID || "standalone";
-const DELIVERY_MODE = process.env.OUTREACH_DELIVERY_MODE || "send_paced";
+const DELIVERY_MODE_RAW = (process.env.OUTREACH_DELIVERY_MODE || "draft_only").trim();
+const DELIVERY_MODE = VALID_DELIVERY.has(DELIVERY_MODE_RAW) ? DELIVERY_MODE_RAW : null;
 const PACE_MS = Number(process.env.OUTREACH_PACE_MS ?? 8000);
+
+function printHelp() {
+  console.log(`Usage: node prospect-tool.mjs <search|scrape|check|submit> <args...>
+
+Commands:
+  search  <query>...     Firecrawl search (needs FIRECRAWL_API_KEY)
+  scrape  <url>...       Firecrawl scrape (needs FIRECRAWL_API_KEY)
+  check   <domain>...    CRM domain dedupe (needs AGENTSDR_URL + AGENTSDR_API_KEY)
+  submit  <leads.json>   Import + draft/send via /api/crm/outreach/batch
+
+Delivery (submit): OUTREACH_DELIVERY_MODE
+  draft_only            default — create drafts only, do not send
+  queue_working_hours   queue auto-send for mailbox hours
+  send_now              send immediately (requires explicit approval)
+  send_paced            paced send (requires explicit approval)
+
+Env:
+  AGENTSDR_URL          e.g. https://sdr.linktion.cn (no silent 127.0.0.1 default)
+  AGENTSDR_API_KEY      org API key (Bearer / x-api-key); no hardcoded fallback
+  FIRECRAWL_API_KEY     required for search/scrape
+  OUTREACH_PACE_MS      pace for send_paced (default 8000)`);
+}
 
 const DIRECTORY_OR_MEDIA_DOMAINS = new Set([
   "hkmma.org.hk", "fhki.org.hk", "hktdc.com", "cma.org.hk", "hkpc.org", "hkstp.org", "cyberport.hk",
@@ -335,6 +364,29 @@ async function scrapeOne(url) {
 
 const [, , cmd, ...args] = process.argv;
 
+if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
+  printHelp();
+  process.exit(cmd ? 0 : 1);
+}
+
+if (!DELIVERY_MODE) {
+  console.error(
+    `Invalid OUTREACH_DELIVERY_MODE="${DELIVERY_MODE_RAW}". Expected: draft_only | queue_working_hours | send_now | send_paced`,
+  );
+  process.exit(1);
+}
+
+function requireAgentsdrEnv() {
+  if (!AGENTSDR_URL) {
+    console.error("Missing AGENTSDR_URL (e.g. https://sdr.linktion.cn). No localhost default.");
+    process.exit(1);
+  }
+  if (!AGENTSDR_API_KEY) {
+    console.error("Missing AGENTSDR_API_KEY. Set a real org API key; no hardcoded fallback.");
+    process.exit(1);
+  }
+}
+
 if (cmd === "search") {
   if (!FIRECRAWL_API_KEY) {
     console.error("Missing FIRECRAWL_API_KEY");
@@ -385,6 +437,7 @@ if (cmd === "search") {
   const out = await Promise.all(args.map(scrapeOne));
   console.log(JSON.stringify(out, null, 2));
 } else if (cmd === "check") {
+  requireAgentsdrEnv();
   const out = await checkDomainsInCrm(args.map(normalizeDomain).filter(Boolean));
   const claimedByOtherShards = [];
   for (const raw of args) {
@@ -396,6 +449,7 @@ if (cmd === "search") {
   }
   console.log(JSON.stringify({ ...out, claimedByOtherShards }, null, 2));
 } else if (cmd === "submit") {
+  requireAgentsdrEnv();
   const arg = args[0];
   if (!arg) {
     console.error("Usage: prospect-tool.mjs submit <path-to-json | inline-json>");
@@ -490,6 +544,6 @@ if (cmd === "search") {
   };
   console.log(JSON.stringify(combined, null, 2));
 } else {
-  console.error("Usage: prospect-tool.mjs <search|scrape|check|submit> <args...>");
+  console.error("Unknown command. Run: node prospect-tool.mjs --help");
   process.exit(1);
 }
