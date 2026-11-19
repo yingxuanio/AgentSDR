@@ -89,3 +89,11 @@ service-account*.json
 
 # Real copies of scripts/examples/* (mailboxes, sender knowledge, test person)
 /scripts/local/
+
+# Outreach experiment artifacts — customer ledgers, briefs, queues (never commit)
+/docs/outreach-experiment-ledger.json
+/docs/briefs/
+/docs/previews/
+/docs/linkedin-l1-queue.md
+/docker-compose.local.yml
+/Documents/
