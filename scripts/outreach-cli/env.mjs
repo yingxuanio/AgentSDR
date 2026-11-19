@@ -81,8 +81,14 @@ export function resolveWorkdir() {
   return envTrim("OUTREACH_WORKDIR") || path.join("/tmp", "agy-outreach-workdir");
 }
 
+/**
+ * @deprecated AGY executor retired (t291u). Use resolveCursorAgentBin from cursorAgent.mjs.
+ * Kept only so old imports fail loudly instead of spawning a fake `agy`.
+ */
 export function resolveAgyBin() {
-  return envTrim("AGY_BIN") || "agy";
+  throw new Error(
+    "AGY executor retired. Use Cursor Agent CLI (`agent` / CURSOR_AGENT_BIN) via scripts/outreach-cli/cursorAgent.mjs. Do not wrap Cursor Agent as a binary named agy.",
+  );
 }
 
 export function resolveProspectTool(cliOverride) {
@@ -102,11 +108,29 @@ export function resolveDeliveryMode(raw, { defaultMode = "draft_only" } = {}) {
   return mode;
 }
 
-/** AGY --dangerously-skip-permissions: default OFF. Opt-in via flag or env=1. */
+/**
+ * Permission bypass is forbidden for the Cursor Agent executor (t291u).
+ * Always returns false; callers must not enable --force/--yolo/--dangerously-skip-permissions.
+ */
 export function allowDangerouslySkipPermissions(argv = process.argv) {
-  if (argv.includes("--dangerously-skip-permissions")) return true;
+  const forbidden = [
+    "--dangerously-skip-permissions",
+    "--skip-permissions",
+    "--force",
+    "--yolo",
+  ];
+  if (forbidden.some((f) => argv.includes(f))) {
+    throw new Error(
+      `Permission-bypass flag is forbidden. Configure .cursor/cli.json permissions.allow instead of ${forbidden.join(" / ")}.`,
+    );
+  }
   const v = envTrim("AGY_DANGEROUSLY_SKIP_PERMISSIONS").toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
+  if (v === "1" || v === "true" || v === "yes") {
+    throw new Error(
+      "AGY_DANGEROUSLY_SKIP_PERMISSIONS is forbidden after AGY retirement. Use Cursor Agent allowlist permissions only.",
+    );
+  }
+  return false;
 }
 
 export function assertFileExists(p, label) {

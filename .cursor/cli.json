@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(node)",
+      "Shell(bun)",
+      "Read(scripts/**)",
+      "Read(/tmp/agy-outreach-workdir/**)",
+      "Write(/tmp/agy-outreach-workdir/**)"
+    ],
+    "deny": [
+      "Shell(docker)",
+      "Shell(psql)",
+      "Shell(lsof)",
+      "Shell(curl)",
+      "Shell(wget)",
+      "Read(.env*)",
+      "Write(.env*)",
+      "Write(**/*.pem)",
+      "Write(**/*.key)"
+    ]
+  }
+}

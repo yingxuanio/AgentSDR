@@ -51,22 +51,30 @@
 ## 三、常用运行与复盘命令速查
 
 ```bash
+# 执行器：官方 Cursor Agent CLI（`agent`），不再使用 AGY；禁止把 Agent 包装成名为 agy 的假程序。
+# 必填 Secrets：AGENTSDR_URL / AGENTSDR_API_KEY / CURSOR_API_KEY / EXA_API_KEY|FIRECRAWL_API_KEY /
+#   AGENTSDR_OWN_MAILBOXES / AGENTSDR_FROM_EMAIL_ZH|EN
+# 权限：仅 .cursor/cli.json allowlist（Shell(node) 跑 prospect-tool）；禁止 --force/--yolo/--dangerously-skip-permissions
+# 安装 Agent CLI：curl https://cursor.com/install -fsS | bash
+# 默认 delivery=draft_only；熔断锁下不要 send-paced。
+
 # 1. 前置复盘 + 更新账本
-/Users/ivan/.local/bin/node /Users/ivan/projects/AgentSDR/scripts/wave-review-tool.mjs retrospective --days 14 --sync-mailboxes --write-ledger
+node scripts/wave-review-tool.mjs retrospective --days 14 --sync-mailboxes --write-ledger
 
 # 2. 为 3–8 天到期高潜线索准备 Touch #2（直接交付 3 条核对要点；可选挂 S 级概念预览 URL）
-/Users/ivan/.local/bin/node /Users/ivan/projects/AgentSDR/scripts/wave-review-tool.mjs prepare-followups --limit 4 --min-days 3 --max-days 8 [--preview-url https://...]
+node scripts/wave-review-tool.mjs prepare-followups --limit 4 --min-days 3 --max-days 8 [--preview-url https://...]
 
-# 3. 战线 A 招聘信号新客开拓（draft_only，单日 <= 8 家）
-/Users/ivan/.local/bin/node /Users/ivan/projects/AgentSDR/scripts/run-outreach-wave.mjs --target 6 --concurrency 4 --model gemini-3.8-flash-medium --delivery draft_only --experiment-arm auto
+# 3. 战线 A 招聘信号新客开拓（draft_only，单日容量截断）
+# --model 默认仍是历史字符串 gemini-3.8-flash-medium；若 Cursor 不支持，由 Ivan 指定兼容 model id（勿擅自换付费模型）
+node scripts/run-outreach-wave.mjs --target 6 --concurrency 4 --model gemini-3.8-flash-medium --delivery draft_only --experiment-arm auto
 
 # 4. 生成方案 A 一页核对单 + 筛选本周 S 级 Working Preview 候选 + 刷新 LinkedIn L1 工作台
-/Users/ivan/.local/bin/node /Users/ivan/projects/AgentSDR/scripts/wave-review-tool.mjs generate-briefs --pending
-/Users/ivan/.local/bin/node /Users/ivan/projects/AgentSDR/scripts/wave-review-tool.mjs s-tier-candidates --limit 5
-/Users/ivan/.local/bin/node /Users/ivan/projects/AgentSDR/scripts/wave-review-tool.mjs linkedin-l1 --limit 10 --write-doc
+node scripts/wave-review-tool.mjs generate-briefs --pending
+node scripts/wave-review-tool.mjs s-tier-candidates --limit 5
+node scripts/wave-review-tool.mjs linkedin-l1 --limit 10 --write-doc
 
-# 5. 逐封审核 + 节流发送 + LinkedIn L1 回写台账
-/Users/ivan/.local/bin/node /Users/ivan/projects/AgentSDR/scripts/wave-review-tool.mjs list-pending
-/Users/ivan/.local/bin/node /Users/ivan/projects/AgentSDR/scripts/wave-review-tool.mjs send-paced --pace-ms 8000 --experiment-arm <arm> --write-ledger --report <wave-report.json> <draftId1> ...
-/Users/ivan/.local/bin/node /Users/ivan/projects/AgentSDR/scripts/wave-review-tool.mjs mark-linkedin-sent <recordId> [--url <linkedinUrl>]
+# 5. 逐封审核 + 节流发送 + LinkedIn L1 回写台账（仅 Ivan 批准且熔断解除后）
+node scripts/wave-review-tool.mjs list-pending
+node scripts/wave-review-tool.mjs send-paced --pace-ms 8000 --experiment-arm <arm> --write-ledger --report <wave-report.json> <draftId1> ...
+node scripts/wave-review-tool.mjs mark-linkedin-sent <recordId> [--url <linkedinUrl>]
 ```

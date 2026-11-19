@@ -1,34 +1,45 @@
 #!/usr/bin/env node
 /**
- * Autonomous AGY Outreach Wave Orchestrator & Telemetry Auditor
+ * Outreach Wave Orchestrator (Cursor Agent executor)
  *
- * Guides parallel sharded `agy` CLI workers to discover, verify, import, draft,
- * and (only when explicitly requested) send personalized outreach via AgentSDR.
+ * Spawns official Cursor Agent CLI (`agent`) workers to discover, verify, import,
+ * and draft personalized outreach via AgentSDR. AGY is retired — do not wrap
+ * Cursor Agent as a binary named `agy`.
  *
  * Usage:
  *   node scripts/run-outreach-wave.mjs --help
  *   node scripts/run-outreach-wave.mjs --target 8 --concurrency 4 --delivery draft_only --experiment-arm auto
  *
- * Required env: AGENTSDR_URL, AGENTSDR_API_KEY, and EXA_API_KEY and/or FIRECRAWL_API_KEY.
- * Never reads .env files. AGY --dangerously-skip-permissions is OFF unless
- * --dangerously-skip-permissions or AGY_DANGEROUSLY_SKIP_PERMISSIONS=1.
+ * Required env: AGENTSDR_URL, AGENTSDR_API_KEY, CURSOR_API_KEY,
+ *   and EXA_API_KEY and/or FIRECRAWL_API_KEY.
+ * Never reads .env files. Permission bypass flags (--force/--yolo/
+ * --dangerously-skip-permissions) are refused; use .cursor/cli.json allowlist.
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import {
+  REPO_ROOT,
   allowDangerouslySkipPermissions,
   assertFileExists,
   envTrim,
   requireAgentsdrApiKey,
   requireAgentsdrUrl,
-  resolveAgyBin,
   resolveDeliveryMode,
   resolvePath,
   resolveProspectTool,
   resolveWorkdir,
 } from "./outreach-cli/env.mjs";
+import {
+  LEGACY_AGY_MODEL,
+  assertCursorAgentAvailable,
+  assertNoPermissionBypass,
+  buildCursorAgentArgs,
+  detectUnsupportedModelMessage,
+  requireCursorApiKey,
+  resolveCursorAgentBin,
+} from "./outreach-cli/cursorAgent.mjs";
 
 const args = process.argv.slice(2);
 function getArg(flag, fallback) {
@@ -45,18 +56,17 @@ function printHelp() {
 Options:
   --help                 Show help (no network)
   --target <n>           Discovery quota (default 8)
-  --concurrency <n>      Parallel AGY workers (default 4)
-  --model <id>           AGY model
+  --concurrency <n>      Parallel Cursor Agent workers (default 4)
+  --model <id>           Cursor Agent --model id (default legacy string ${LEGACY_AGY_MODEL}; may need Ivan remap)
   --delivery <mode>      draft_only (default) | queue_working_hours | send_now | send_paced
   --pace-ms <ms>         Pace for send_paced
-  --worker-timeout <s>   Per-worker timeout
+  --worker-timeout <s>   Per-worker wall-clock timeout (default 900)
   --experiment-arm <id>  Experiment arm or auto
   --prospect-tool <path> Override prospect-tool.mjs
-  --dangerously-skip-permissions
-                         Opt-in AGY permission bypass (DEFAULT OFF)
 
-Required env: AGENTSDR_URL, AGENTSDR_API_KEY, EXA_API_KEY and/or FIRECRAWL_API_KEY
-Optional: AGY_BIN, OUTREACH_WORKDIR, PROSPECT_TOOL, AGY_DANGEROUSLY_SKIP_PERMISSIONS`);
+Required env: AGENTSDR_URL, AGENTSDR_API_KEY, CURSOR_API_KEY, EXA_API_KEY and/or FIRECRAWL_API_KEY
+Optional: CURSOR_AGENT_BIN, OUTREACH_WORKDIR, PROSPECT_TOOL
+Permissions: .cursor/cli.json allowlist only — --force/--yolo/--dangerously-skip-permissions refused`);
 }
 
 if (hasFlag("--help") || hasFlag("-h")) {
@@ -66,10 +76,13 @@ if (hasFlag("--help") || hasFlag("-h")) {
 
 const TARGET_COUNT = Number(getArg("--target", "8"));
 const CONCURRENCY = Number(getArg("--concurrency", "4"));
-const MODEL = getArg("--model", "gemini-3.8-flash-medium");
+const MODEL = getArg("--model", LEGACY_AGY_MODEL);
 let DELIVERY_MODE;
 try {
   DELIVERY_MODE = resolveDeliveryMode(getArg("--delivery", "draft_only"));
+  // Refuse any permission-bypass flags early (throws).
+  allowDangerouslySkipPermissions(args);
+  assertNoPermissionBypass(args);
 } catch (e) {
   console.error(e.message);
   process.exit(1);
@@ -80,17 +93,18 @@ const EXPERIMENT_ARM_ARG = getArg("--experiment-arm", "auto");
 
 let AGENTSDR_URL;
 let AGENTSDR_API_KEY;
+let AGENT_BIN;
 try {
   AGENTSDR_URL = requireAgentsdrUrl();
   AGENTSDR_API_KEY = requireAgentsdrApiKey();
+  requireCursorApiKey();
+  AGENT_BIN = assertCursorAgentAvailable(resolveCursorAgentBin());
 } catch (e) {
   console.error(e.message);
   process.exit(1);
 }
 
 const PROSPECT_TOOL = resolveProspectTool(getArg("--prospect-tool", null));
-const AGY_BIN = resolveAgyBin();
-const SKIP_PERMS = allowDangerouslySkipPermissions(args);
 const WORKDIR_ROOT = resolveWorkdir();
 const WAVE_CURSOR_FILE = path.join(WORKDIR_ROOT, "wave-cursor.json");
 const LEDGER_PATH = resolvePath("OUTREACH_LEDGER_PATH", "docs/outreach-experiment-ledger.json");
@@ -111,8 +125,10 @@ try {
 if (DELIVERY_MODE === "send_now" || DELIVERY_MODE === "send_paced") {
   console.warn(`[safety] delivery=${DELIVERY_MODE} will send mail — requires an approved batch.`);
 }
-if (SKIP_PERMS) {
-  console.warn("[safety] AGY --dangerously-skip-permissions enabled via explicit opt-in.");
+if (MODEL === LEGACY_AGY_MODEL) {
+  console.warn(
+    `[compat] --model default is legacy AGY string "${LEGACY_AGY_MODEL}". If Cursor Agent rejects it, ask Ivan for a supported Cursor model id (do not auto-pick).`,
+  );
 }
 
 const SHARDS = [
@@ -295,44 +311,77 @@ function spawnWorkerAttempt({ shard, prompt, waveWorkDir, evidenceFile, claimsDi
     const startTs = Date.now();
     const workerCwd = path.join(waveWorkDir, `cwd-${shard.id}`);
     fs.mkdirSync(workerCwd, { recursive: true });
+    // Prefer repo root as --workspace so project .cursor/cli.json allowlist applies;
+    // keep a per-shard cwd for relative artifacts the agent may write.
     const logPath = path.join(waveWorkDir, `worker-${shard.id}.log`);
 
-    const agyArgs = [
-        "--model",
-        MODEL,
-        "--disable-slash-commands",
-        "--print-timeout",
-        `${WORKER_TIMEOUT_SEC}s`,
-        "--print",
+    let agentArgs;
+    try {
+      agentArgs = buildCursorAgentArgs({
+        model: MODEL,
         prompt,
-      ];
-    if (SKIP_PERMS) agyArgs.splice(2, 0, "--dangerously-skip-permissions");
-    const child = spawn(
-      AGY_BIN,
-      agyArgs,
-      {
-        cwd: workerCwd,
-        env: {
-          ...process.env,
-          PATH: `${os.homedir()}/.local/bin:${os.homedir()}/.bun/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`,
-          EXA_API_KEY,
-          FIRECRAWL_API_KEY,
-          AGENTSDR_URL,
-          AGENTSDR_API_KEY,
-          PROSPECT_EVIDENCE_FILE: evidenceFile,
-          PROSPECT_CLAIMS_DIR: claimsDir,
-          PROSPECT_SHARD_ID: shard.id,
-          OUTREACH_DELIVERY_MODE: DELIVERY_MODE,
-          OUTREACH_PACE_MS: String(PACE_MS),
-          OUTREACH_EXPERIMENT_ARM: experimentArm,
-        },
+        workspace: REPO_ROOT,
+        trustWorkspace: true,
+        outputFormat: "text",
+      });
+    } catch (e) {
+      resolve({
+        shardId: shard.id,
+        code: 1,
+        elapsedSec: 0,
+        logPath,
+        stdoutTail: "",
+        stderrTail: e.message,
+        modelCompatNote: null,
+        isTransientFailure: false,
+      });
+      return;
+    }
+
+    const child = spawn(AGENT_BIN, agentArgs, {
+      cwd: workerCwd,
+      env: {
+        ...process.env,
+        PATH: `${os.homedir()}/.local/bin:${os.homedir()}/.cursor/bin:${os.homedir()}/.bun/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH}`,
+        // CURSOR_API_KEY already in process.env when present — do not log it.
+        EXA_API_KEY,
+        FIRECRAWL_API_KEY,
+        AGENTSDR_URL,
+        AGENTSDR_API_KEY,
+        PROSPECT_EVIDENCE_FILE: evidenceFile,
+        PROSPECT_CLAIMS_DIR: claimsDir,
+        PROSPECT_SHARD_ID: shard.id,
+        OUTREACH_DELIVERY_MODE: DELIVERY_MODE,
+        OUTREACH_PACE_MS: String(PACE_MS),
+        OUTREACH_EXPERIMENT_ARM: experimentArm,
       },
-    );
+    });
 
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
     const logStream = fs.createWriteStream(logPath, { flags: "a" });
-    logStream.write(`\n--- [Attempt ${attempt} started ${new Date().toISOString()}] ---\n`);
+    logStream.write(
+      `\n--- [Attempt ${attempt} started ${new Date().toISOString()} bin=${AGENT_BIN} model=${MODEL}] ---\n`,
+    );
+
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      logStream.write(`\n[timeout] killing worker after ${WORKER_TIMEOUT_SEC}s\n`);
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
+      }, 5_000).unref?.();
+    }, WORKER_TIMEOUT_SEC * 1000);
+    killTimer.unref?.();
 
     child.stdout.on("data", (chunk) => {
       const s = chunk.toString();
@@ -345,17 +394,37 @@ function spawnWorkerAttempt({ shard, prompt, waveWorkDir, evidenceFile, claimsDi
       logStream.write(s);
     });
 
-    child.on("close", (code) => {
+    child.on("error", (err) => {
+      clearTimeout(killTimer);
+      logStream.write(`\n[spawn error] ${err.message}\n`);
       logStream.end();
       const elapsedSec = Math.round((Date.now() - startTs) / 1000);
       resolve({
         shardId: shard.id,
-        code,
+        code: 1,
+        elapsedSec,
+        logPath,
+        stdoutTail: stdout.slice(-1200),
+        stderrTail: `${stderr}\n${err.message}`.slice(-800),
+        modelCompatNote: detectUnsupportedModelMessage(`${stdout}\n${stderr}\n${err.message}`, MODEL),
+        isTransientFailure: false,
+      });
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(killTimer);
+      logStream.end();
+      const elapsedSec = Math.round((Date.now() - startTs) / 1000);
+      const combined = `${stdout}\n${stderr}`;
+      resolve({
+        shardId: shard.id,
+        code: timedOut ? 124 : code,
         elapsedSec,
         logPath,
         stdoutTail: stdout.slice(-1200),
         stderrTail: stderr.slice(-800),
-        isTransientFailure: code !== 0 && TRANSIENT_ERROR_RE.test(`${stdout}\n${stderr}`),
+        modelCompatNote: detectUnsupportedModelMessage(combined, MODEL),
+        isTransientFailure: !timedOut && code !== 0 && TRANSIENT_ERROR_RE.test(combined),
       });
     });
   });
@@ -385,6 +454,10 @@ async function runSingleWorker({ shard, quota, waveWorkDir, evidenceFile, claims
     });
     totalElapsedSec += res.elapsedSec;
     lastResult = { ...res, attempts: attempt, retriedTransient, elapsedSec: totalElapsedSec };
+
+    if (res.modelCompatNote) {
+      console.warn(`[compat] ${res.modelCompatNote}`);
+    }
 
     if (res.code === 0) {
       console.log(`[Worker ${shard.id}] exited code=0 in ${totalElapsedSec}s (attempts=${attempt})`);
@@ -566,6 +639,8 @@ async function main() {
       outputTokens: telemetry.reduce((s, x) => s + x.outputTokens, 0),
     },
     telemetryBySession: telemetry,
+    executor: "cursor-agent",
+    agentBin: AGENT_BIN,
     workers: workerResults.map((w) => ({
       shardId: w.shardId,
       code: w.code,
@@ -573,6 +648,7 @@ async function main() {
       attempts: w.attempts ?? 1,
       retriedTransient: w.retriedTransient ?? 0,
       logPath: w.logPath,
+      modelCompatNote: w.modelCompatNote || null,
     })),
     leads: recentDrafts.map((d) => ({
       code: d.company?.code,

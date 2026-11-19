@@ -47,8 +47,10 @@ describe("allowDangerouslySkipPermissions", () => {
     if (prev !== undefined) process.env.AGY_DANGEROUSLY_SKIP_PERMISSIONS = prev;
   });
 
-  test("opt-in via flag", () => {
-    expect(allowDangerouslySkipPermissions(["node", "x", "--dangerously-skip-permissions"])).toBe(true);
+  test("bypass flags are refused (no opt-in)", () => {
+    expect(() =>
+      allowDangerouslySkipPermissions(["node", "x", "--dangerously-skip-permissions"]),
+    ).toThrow(/forbidden|Permission/);
   });
 });
 
@@ -66,7 +68,7 @@ describe("CLI help / fail-closed (no network send)", () => {
     });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("draft_only");
-    expect(r.stdout).toContain("DEFAULT OFF");
+    expect(r.stdout).toMatch(/CURSOR_API_KEY|Cursor Agent/);
   });
 
   test("run-outreach-wave without AGENTSDR_URL exits 1", () => {
